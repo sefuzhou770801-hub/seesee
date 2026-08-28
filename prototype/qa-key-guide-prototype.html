@@ -1,0 +1,194 @@
+<!doctype html>
+<!-- PROTOTYPE，抛弃件：看时问答无密钥引导的三种形态，←/→ 或底栏切换。回答的问题：无密钥时按 a，引导界面应该长什么样。 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>看时问答密钥引导原型</title>
+<style>
+  :root{
+    --canvas:#161618; --raise:#232326; --ink:#ececf0; --ink2:rgba(236,236,240,.62);
+    --hair:rgba(255,255,255,.09); --border:rgba(255,255,255,.16); --accent:#e8e8ee;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,"PingFang SC",system-ui,sans-serif}
+  body{background:#000;color:var(--ink);height:100vh;overflow:hidden}
+
+  /* 假播放器现场 */
+  .stage{position:relative;height:100vh;background:radial-gradient(120% 90% at 50% 30%,#26303a 0%,#0d1014 60%,#000 100%)}
+  .fakevideo{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.10);font-size:44px;letter-spacing:.3em;user-select:none}
+  .subline{position:absolute;left:0;right:0;bottom:120px;text-align:center;text-shadow:0 1px 6px rgba(0,0,0,.8)}
+  .subline .en{font-size:20px;color:#fff}
+  .subline .zh{font-size:17px;color:rgba(255,255,255,.85);margin-top:6px}
+  .paused{position:absolute;top:24px;left:28px;font-size:13px;color:rgba(255,255,255,.5);background:rgba(0,0,0,.4);padding:4px 10px;border-radius:99px}
+
+  /* 通用控件 */
+  .field{display:flex;align-items:center;gap:8px;background:var(--raise);border:1px solid var(--border);border-radius:12px;padding:9px 12px}
+  .field input{flex:1;background:none;border:none;outline:none;color:var(--ink);font-size:14px}
+  .field input::placeholder{color:rgba(236,236,240,.35)}
+  .btn{border:none;border-radius:10px;padding:9px 16px;font-size:14px;font-weight:600;cursor:pointer;background:var(--accent);color:#111}
+  .btn:disabled{opacity:.35;cursor:default}
+  .btn.ghost{background:none;color:var(--ink2);font-weight:400;font-size:13px}
+  .cmd{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:rgba(236,236,240,.45);user-select:all;line-height:1.6;word-break:break-all}
+  .hint{font-size:12px;color:var(--ink2);line-height:1.6}
+  .note{font-size:13px;color:var(--ink2);line-height:1.7}
+  .cardtitle{font-size:16px;font-weight:700}
+  a{color:rgba(160,190,255,.85);text-decoration:none}
+  .toast{position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(40,42,46,.95);border:1px solid var(--hair);color:var(--ink);font-size:13px;padding:8px 16px;border-radius:99px;opacity:0;transition:opacity .25s;pointer-events:none}
+  .toast.show{opacity:1}
+
+  /* 问答底部面板（正常提问态，三个变体保存后共同落点） */
+  .qapanel{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;width:min(640px,calc(100vw - 48px));background:rgba(22,22,24,.94);border:1px solid var(--hair);border-radius:18px;padding:14px;display:none}
+  .qapanel.show{display:block;animation:rise .25s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+  /* 变体 A：居中模态窗口 */
+  .dim{position:absolute;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center}
+  .dim.show{display:flex}
+  .modal{width:420px;background:#1c1c1f;border:1px solid var(--border);border-radius:20px;padding:26px 26px 20px;box-shadow:0 24px 80px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:14px;animation:pop .22s ease-out}
+  @keyframes pop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+
+  /* 变体 B：面板内嵌引导态 */
+  .inline-guide{display:flex;flex-direction:column;gap:12px}
+
+  /* 变体 C：两步窗口 */
+  .steps{display:flex;gap:6px}
+  .steps i{width:24px;height:3px;border-radius:2px;background:rgba(255,255,255,.15)}
+  .steps i.on{background:var(--accent)}
+  .featrow{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--ink2);line-height:1.6}
+  .featrow .ico{width:20px;text-align:center;flex:none;opacity:.8}
+
+  /* 原型切换底栏 */
+  .switcher{position:fixed;bottom:14px;right:18px;z-index:99;display:flex;align-items:center;gap:10px;background:#2f6fed;color:#fff;border-radius:99px;padding:7px 14px;font-size:13px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,.5);user-select:none}
+  .switcher button{background:none;border:none;color:#fff;font-size:15px;cursor:pointer;padding:0 2px}
+  .switcher .replay{font-weight:400;opacity:.85;font-size:12px;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="fakevideo">视频画面</div>
+  <div class="paused">已暂停</div>
+  <div class="subline">
+    <div class="en">So the key idea behind attention is surprisingly simple.</div>
+    <div class="zh">所以注意力机制背后的核心想法，其实简单得出人意料。</div>
+  </div>
+  <div class="toast" id="toast">密钥已保存，开始提问吧</div>
+
+  <!-- 变体 A：居中模态窗口 -->
+  <div class="dim" id="vA">
+    <div class="modal">
+      <div class="cardtitle">看时问答需要 Anthropic API 密钥</div>
+      <div class="note">提问时会把当前画面和前后字幕发给 Claude 回答。密钥只保存在本机。</div>
+      <div class="field"><input type="password" placeholder="粘贴密钥（sk-ant-…）" data-keyfield></div>
+      <button class="btn" data-save disabled>保存并开始提问</button>
+      <div class="hint">也可以在终端执行：<br><span class="cmd">defaults write com.mg.replay AnthropicAPIKey -string sk-…</span></div>
+    </div>
+  </div>
+
+  <!-- 变体 B：面板原位变身引导态 -->
+  <div class="qapanel" id="vB">
+    <div class="inline-guide">
+      <div class="cardtitle" style="font-size:15px">先配置密钥，才能提问</div>
+      <div class="note" style="font-size:12.5px">提问时会把当前画面和前后字幕发给 Claude 回答。密钥只保存在本机。</div>
+      <div style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><input type="password" placeholder="粘贴密钥（sk-ant-…）" data-keyfield></div>
+        <button class="btn" data-save disabled>保存</button>
+      </div>
+      <div class="hint">终端方式：<span class="cmd">defaults write com.mg.replay AnthropicAPIKey -string sk-…</span></div>
+    </div>
+  </div>
+
+  <!-- 变体 C：两步窗口（先讲清楚，再要密钥） -->
+  <div class="dim" id="vC">
+    <div class="modal">
+      <div class="steps"><i class="on" id="c-dot1"></i><i id="c-dot2"></i></div>
+      <div id="c-step1" style="display:flex;flex-direction:column;gap:14px">
+        <div class="cardtitle">边看边问，需要先接上 Claude</div>
+        <div class="featrow"><span class="ico">💬</span><span>暂停时提问，回答会参考当前画面和前后一分半的字幕</span></div>
+        <div class="featrow"><span class="ico">📌</span><span>问答钉在时间轴上，右栏随时回看</span></div>
+        <div class="featrow"><span class="ico">🔒</span><span>需要你自己的 Anthropic API 密钥，只保存在本机</span></div>
+        <button class="btn" onclick="cStep(2)">我有密钥，去粘贴</button>
+        <div style="text-align:center"><a href="#" onclick="return false">还没有密钥？去 console.anthropic.com 创建</a></div>
+      </div>
+      <div id="c-step2" style="display:none;flex-direction:column;gap:14px">
+        <div class="cardtitle">粘贴密钥</div>
+        <div class="field"><input type="password" placeholder="sk-ant-…" data-keyfield></div>
+        <button class="btn" data-save disabled>保存并开始提问</button>
+        <div class="hint">也可以在终端执行：<br><span class="cmd">defaults write com.mg.replay AnthropicAPIKey -string sk-…</span></div>
+        <button class="btn ghost" onclick="cStep(1)">← 上一步</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 保存成功后的正常提问态（共同落点） -->
+  <div class="qapanel" id="qaNormal">
+    <div class="field">
+      <input type="text" placeholder="问画面或字幕…" id="qaInput">
+      <span style="font-size:20px;opacity:.9">⬆︎</span>
+    </div>
+  </div>
+</div>
+
+<div class="switcher">
+  <button onclick="go(-1)">◀</button>
+  <span id="label"></span>
+  <button onclick="go(1)">▶</button>
+  <span class="replay" onclick="reset()">重播</span>
+</div>
+
+<script>
+const variants=[
+  {id:'vA',name:'A · 居中窗口'},
+  {id:'vB',name:'B · 面板内嵌'},
+  {id:'vC',name:'C · 两步窗口'},
+];
+let cur=Math.max(0,variants.findIndex(v=>v.id==='v'+(new URLSearchParams(location.search).get('variant')||'A')));
+
+function reset(){
+  document.getElementById('qaNormal').classList.remove('show');
+  document.getElementById('toast').classList.remove('show');
+  variants.forEach(v=>document.getElementById(v.id).classList.remove('show'));
+  document.querySelectorAll('[data-keyfield]').forEach(i=>i.value='');
+  document.querySelectorAll('[data-save]').forEach(b=>b.disabled=true);
+  cStep(1);
+  const v=variants[cur];
+  document.getElementById(v.id).classList.add('show');
+  document.getElementById('label').textContent=v.name;
+  const u=new URL(location);u.searchParams.set('variant',v.id.slice(1));history.replaceState(null,'',u);
+}
+function go(d){cur=(cur+d+variants.length)%variants.length;reset();}
+function cStep(n){
+  document.getElementById('c-step1').style.display=n===1?'flex':'none';
+  document.getElementById('c-step2').style.display=n===2?'flex':'none';
+  document.getElementById('c-dot1').className=n===1?'on':'';
+  document.getElementById('c-dot2').className=n===2?'on':'';
+  if(n===2){const f=document.querySelector('#vC [data-keyfield]');setTimeout(()=>f&&f.focus(),50);}
+}
+document.querySelectorAll('[data-keyfield]').forEach(inp=>{
+  inp.addEventListener('input',()=>{
+    const btn=inp.closest('.modal,.inline-guide,#c-step2,#vB').querySelector('[data-save]');
+    if(btn)btn.disabled=inp.value.trim()==='';
+  });
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){const btn=inp.closest('.modal,#vB').querySelector('[data-save]');if(btn&&!btn.disabled)btn.click();}
+    e.stopPropagation();
+  });
+});
+document.querySelectorAll('[data-save]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    variants.forEach(v=>document.getElementById(v.id).classList.remove('show'));
+    document.getElementById('qaNormal').classList.add('show');
+    const t=document.getElementById('toast');t.classList.add('show');
+    setTimeout(()=>t.classList.remove('show'),1800);
+    setTimeout(()=>document.getElementById('qaInput').focus(),100);
+  });
+});
+document.addEventListener('keydown',e=>{
+  const tag=document.activeElement&&document.activeElement.tagName;
+  if(tag==='INPUT'||tag==='TEXTAREA')return;
+  if(e.key==='ArrowLeft')go(-1);
+  if(e.key==='ArrowRight')go(1);
+  if(e.key==='Escape')reset();
+});
+reset();
+</script>
+</body>
+</html>
