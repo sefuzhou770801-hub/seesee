@@ -110,13 +110,38 @@ final class WatchQASession: ObservableObject {
     static let persistFailedHint = "回答没有存上，可重试"
     static let incompleteHint = "回答没说完就断了，没有存上，可重试"
 
+    /// 浮层的两态：正常提问，或缺密钥时的界面内引导。
+    enum Mode: Equatable {
+        case ask
+        case keyGuide
+    }
+
     @Published var isPresented = false
+    @Published var mode: Mode = .ask
     @Published var question = ""
     @Published var answer = ""
     @Published var statusMessage: String?
     @Published var isStreaming = false
+    /// 引导态里粘贴的密钥草稿，以及「不像 sk- 开头」的一次性提醒。
+    @Published var keyDraft = ""
+    @Published var keyPrefixWarning: String?
 
     private var streamTask: Task<Void, Never>?
+    /// 密钥的读取与写入抽成注入点：生产走 UserDefaults + 环境变量，测试可注入内存替身，
+    /// 不依赖进程级 env 与共享 defaults。
+    private let resolveKey: () -> String?
+    private let persistKey: (String) -> Void
+
+    init(
+        resolveKey: @escaping () -> String? = { WatchQAAPIKey.resolve() },
+        persistKey: @escaping (String) -> Void = { WatchQAAPIKey.save($0) }
+    ) {
+        self.resolveKey = resolveKey
+        self.persistKey = persistKey
+    }
+
+    /// 保存按钮是否可点：草稿去空白后非空即可点。
+    var canSaveKey: Bool { WatchQAKeyEntry.canSave(keyDraft) }
 
     func present() {
         guard !isPresented else { return }
@@ -126,7 +151,11 @@ final class WatchQASession: ObservableObject {
         isStreaming = false
         streamTask?.cancel()
         streamTask = nil
-        statusMessage = WatchQAAPIKey.resolve() == nil ? WatchQAAPIKey.missingKeyHint : nil
+        statusMessage = nil
+        keyDraft = ""
+        keyPrefixWarning = nil
+        // 已配密钥（defaults 或环境变量任一）直接进提问态，缺密钥才进引导态。
+        mode = resolveKey() == nil ? .keyGuide : .ask
     }
 
     @discardableResult
@@ -134,9 +163,12 @@ final class WatchQASession: ObservableObject {
         guard isPresented else { return false }
         cancel()
         isPresented = false
+        mode = .ask
         question = ""
         answer = ""
         statusMessage = nil
+        keyDraft = ""
+        keyPrefixWarning = nil
         if resume {
             PlaybackCommandCenter.shared.play()
         }
@@ -149,6 +181,34 @@ final class WatchQASession: ObservableObject {
         isStreaming = false
     }
 
+    /// 引导态点「保存并开始提问」：写入密钥并当场切回提问态（焦点落回问题框由界面处理）。
+    /// 不以 sk- 开头时首次点击只提醒，再点一次仍保存，不做网络校验。
+    func saveKey() {
+        let normalized = WatchQAKeyEntry.normalized(keyDraft)
+        guard !normalized.isEmpty else { return }
+        if WatchQAKeyEntry.needsPrefixWarning(keyDraft), keyPrefixWarning == nil {
+            keyPrefixWarning = WatchQAKeyEntry.prefixWarning
+            return
+        }
+        persistKey(normalized)
+        mode = .ask
+        keyDraft = ""
+        keyPrefixWarning = nil
+        statusMessage = nil
+        question = ""
+        answer = ""
+    }
+
+    /// 缺密钥时进引导态：停掉在跑的流，清掉提问态残留，让界面替换为引导内容。
+    private func enterKeyGuide() {
+        cancel()
+        mode = .keyGuide
+        keyDraft = ""
+        keyPrefixWarning = nil
+        statusMessage = nil
+        answer = ""
+    }
+
     func submit(
         item: WatchItem,
         snapshot: PlaybackSnapshot,
@@ -156,8 +216,9 @@ final class WatchQASession: ObservableObject {
         sidecar: WatchQASidecar? = nil,
         onPersisted: ((WatchQAEntry) -> Void)? = nil
     ) {
-        guard let apiKey = WatchQAAPIKey.resolve() else {
-            statusMessage = WatchQAAPIKey.missingKeyHint
+        // 密钥失效被删（resolve 返回 nil）时切入引导态，不再只弹一行状态文字。
+        guard let apiKey = resolveKey() else {
+            enterKeyGuide()
             return
         }
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -252,9 +313,34 @@ final class WatchQASession: ObservableObject {
 struct WatchQAOverlay: View {
     @ObservedObject var session: WatchQASession
     var isQuestionFieldFocused: FocusState<Bool>.Binding
+    var isKeyFieldFocused: FocusState<Bool>.Binding
+    let onSaveKey: () -> Void
     let onSubmit: () -> Void
 
     var body: some View {
+        Group {
+            switch session.mode {
+            case .keyGuide:
+                keyGuide
+            case .ask:
+                askPanel
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 640)
+        .background(
+            OpenMyChrome.canvas.opacity(0.94),
+            in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusXl, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: OpenMyChrome.radiusXl, style: .continuous)
+                .strokeBorder(OpenMyChrome.hair)
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 16)
+    }
+
+    private var askPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let status = session.statusMessage {
                 Text(status)
@@ -302,18 +388,76 @@ struct WatchQAOverlay: View {
                     .strokeBorder(OpenMyChrome.fieldBorder)
             }
         }
-        .padding(14)
-        .frame(maxWidth: 640)
-        .background(
-            OpenMyChrome.canvas.opacity(0.94),
-            in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusXl, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: OpenMyChrome.radiusXl, style: .continuous)
-                .strokeBorder(OpenMyChrome.hair)
+    }
+
+    // 临时占位布局：仅用于打通「缺密钥切引导态」的状态骨架，让 present/submit/saveKey
+    // 全链路可编译、可测、可手动走通。最终形态（可能改为居中模态窗口）与文案待原型定稿后重做，
+    // 届时只改本视图，底层状态机与密钥写入逻辑不动。
+    private var keyGuide: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("看时问答需要 Anthropic API 密钥")
+                    .font(.headline)
+                    .foregroundStyle(OpenMyChrome.ink)
+                Text("提问时会把当前画面和前后字幕发送给 Claude 回答。")
+                    .font(.callout)
+                    .foregroundStyle(OpenMyChrome.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SecureField("sk-ant-…", text: $session.keyDraft)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .foregroundStyle(OpenMyChrome.ink)
+                .focused(isKeyFieldFocused)
+                .onSubmit(onSaveKey)
+                .onChange(of: session.keyDraft) { _ in
+                    // 改动草稿即重新判定，让「以 sk- 开头」提醒随输入复位。
+                    session.keyPrefixWarning = nil
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(
+                    OpenMyChrome.raise,
+                    in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusLg, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: OpenMyChrome.radiusLg, style: .continuous)
+                        .strokeBorder(OpenMyChrome.fieldBorder)
+                }
+
+            if let warning = session.keyPrefixWarning {
+                Text(warning)
+                    .font(.footnote)
+                    .foregroundStyle(OpenMyChrome.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button(action: onSaveKey) {
+                Text("保存并开始提问")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(OpenMyChrome.canvas)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(
+                        OpenMyChrome.ink,
+                        in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusMd, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: OpenMyChrome.radiusMd, style: .continuous)
+                            .strokeBorder(OpenMyChrome.hair)
+                    }
+            }
+            .buttonStyle(.plain)
+            .disabled(!session.canSaveKey)
+            .opacity(session.canSaveKey ? 1 : 0.5)
+
+            Text("也可以在终端执行：\(WatchQAAPIKey.terminalCommand)")
+                .font(.footnote)
+                .foregroundStyle(OpenMyChrome.faint)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 24)
-        .padding(.bottom, 16)
     }
 
     private var canSubmit: Bool {

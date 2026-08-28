@@ -58,6 +58,13 @@ final class Recorder: @unchecked Sendable {
     var entry: WatchQAEntry?
 }
 
+/// 内存密钥替身：注入 WatchQASession 的读写，隔离进程级环境变量与共享 UserDefaults。
+/// 只在 MainActor 上访问。
+final class KeyStore: @unchecked Sendable {
+    var value: String?
+    init(_ value: String? = nil) { self.value = value }
+}
+
 @main
 struct QASessionCheck {
     static func main() async throws {
@@ -66,6 +73,12 @@ struct QASessionCheck {
         try await checkStreamStopsAtMessageStop()
         try await checkStreamTruncationNotCompleted()
         try await checkStreamHTTPErrorThrows()
+
+        // 缺密钥引导态（注入内存密钥替身，不碰 env 与共享 defaults）。
+        try await checkPresentEntersGuideWithoutKey()
+        try await checkSaveKeyPersistsAndReturnsToAsk()
+        try await checkNonSkPrefixWarnsThenSaves()
+        try await checkSubmitFallsBackToGuideWhenKeyGone()
 
         // 真实生产事件链：submit → 截帧 → 流式 → 落盘 → onPersisted 分支。
         URLProtocol.registerClass(MockSSEProtocol.self)
@@ -133,6 +146,77 @@ struct QASessionCheck {
             (thrown as? WatchQAClientError)?.message == "限流了",
             "错误消息须取自服务端 error.message"
         )
+    }
+
+    // MARK: - 缺密钥引导态（真实 WatchQASession）
+
+    /// 无密钥 present：进引导态，草稿空时保存按钮禁用。
+    private static func checkPresentEntersGuideWithoutKey() async throws {
+        let store = KeyStore(nil)
+        await MainActor.run {
+            let s = WatchQASession(resolveKey: { store.value }, persistKey: { store.value = $0 })
+            s.present()
+            precondition(s.isPresented)
+            precondition(s.mode == .keyGuide, "无密钥 present 须进引导态")
+            precondition(!s.canSaveKey, "草稿为空时保存按钮禁用")
+        }
+    }
+
+    /// 引导态保存 sk- 密钥：去空白写入，当场切回提问态并清空草稿；已持久化后再 present 直接进提问态。
+    private static func checkSaveKeyPersistsAndReturnsToAsk() async throws {
+        let store = KeyStore(nil)
+        await MainActor.run {
+            let s = WatchQASession(resolveKey: { store.value }, persistKey: { store.value = $0 })
+            s.present()
+            precondition(s.mode == .keyGuide)
+            s.keyDraft = "  sk-live-1  "
+            precondition(s.canSaveKey)
+            s.saveKey()
+            precondition(store.value == "sk-live-1", "保存写入去首尾空白后的密钥")
+            precondition(s.mode == .ask, "保存后当场切回提问态")
+            precondition(s.keyDraft.isEmpty, "切回提问态清空草稿")
+            precondition(s.keyPrefixWarning == nil)
+
+            _ = s.dismiss(resume: false)
+            s.present()
+            precondition(s.mode == .ask, "密钥已持久化，再 present 直接进提问态")
+        }
+    }
+
+    /// 非 sk- 前缀：首次点击只提醒不保存，再点一次仍保存。
+    private static func checkNonSkPrefixWarnsThenSaves() async throws {
+        let store = KeyStore(nil)
+        await MainActor.run {
+            let s = WatchQASession(resolveKey: { store.value }, persistKey: { store.value = $0 })
+            s.present()
+            s.keyDraft = "live-abc"
+            precondition(s.canSaveKey, "非空可点")
+            s.saveKey()
+            precondition(store.value == nil, "首次点击不保存")
+            precondition(s.mode == .keyGuide, "首次点击仍停在引导态")
+            precondition(s.keyPrefixWarning == WatchQAKeyEntry.prefixWarning, "首次点击弹出前缀提醒")
+            s.saveKey()
+            precondition(store.value == "live-abc", "再点一次仍保存原值")
+            precondition(s.mode == .ask, "保存后进提问态")
+        }
+    }
+
+    /// 提问态 submit 时密钥失效被删（resolve 返回 nil）：切回引导态，不再只弹一行状态文字。
+    private static func checkSubmitFallsBackToGuideWhenKeyGone() async throws {
+        let store = KeyStore(nil)
+        await MainActor.run {
+            let s = WatchQASession(resolveKey: { store.value }, persistKey: { store.value = $0 })
+            s.present()
+            s.mode = .ask // 模拟本来在提问态（密钥曾存在），随后被删
+            s.question = "画面里是什么"
+            s.submit(
+                item: makeItem(id: UUID()),
+                snapshot: PlaybackSnapshot(currentTime: 0),
+                subtitleTrack: nil
+            )
+            precondition(s.mode == .keyGuide, "submit 发现密钥没了须切回引导态")
+            precondition(s.statusMessage == nil, "不再只弹一行状态文字")
+        }
     }
 
     // MARK: - 生产事件链（真实 WatchQASession.submit）

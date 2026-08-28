@@ -27,7 +27,8 @@ enum WatchQAChapter {
 enum WatchQAAPIKey {
     static let defaultsKey = "AnthropicAPIKey"
     static let environmentKey = "ANTHROPIC_API_KEY"
-    static let missingKeyHint = "未配置密钥，终端执行 defaults write com.mg.replay AnthropicAPIKey -string sk-…"
+    /// 引导态底部的次要备选：仍想在终端写入密钥的用户可选中复制，界面填写才是主路径。
+    static let terminalCommand = "defaults write com.mg.replay AnthropicAPIKey -string sk-…"
 
     static func resolve(
         defaults: UserDefaults = .standard,
@@ -40,6 +41,32 @@ enum WatchQAAPIKey {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !fromEnvironment.isEmpty { return fromEnvironment }
         return nil
+    }
+
+    /// 把界面填入的密钥写进 UserDefaults（调用方已去空白）。环境变量来源只读，不在此写。
+    static func save(_ key: String, defaults: UserDefaults = .standard) {
+        defaults.set(key, forKey: defaultsKey)
+    }
+}
+
+/// 引导态密钥输入的纯逻辑：可保存判定、前缀提醒判定、写入前规范化。界面与测试共用同一口径。
+enum WatchQAKeyEntry {
+    static let prefixWarning = "密钥一般以 sk- 开头，确认粘贴完整"
+
+    /// 写入值：去首尾空白。
+    static func normalized(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 保存按钮是否可点：去空白后非空即可点。
+    static func canSave(_ raw: String) -> Bool {
+        !normalized(raw).isEmpty
+    }
+
+    /// 是否需要「以 sk- 开头」提醒：非空但不以 sk- 开头。
+    static func needsPrefixWarning(_ raw: String) -> Bool {
+        let trimmed = normalized(raw)
+        return !trimmed.isEmpty && !trimmed.hasPrefix("sk-")
     }
 }
 

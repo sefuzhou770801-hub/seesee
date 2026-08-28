@@ -6,7 +6,7 @@ struct QAContextCheck {
         checkSubtitleWindow()
         checkChapterLookup()
         checkRequestJSON()
-        checkMissingKeyHint()
+        checkKeyResolveSaveAndEntry()
         checkSSEParsing()
         print("qa_context_check=passed")
     }
@@ -190,14 +190,16 @@ struct QAContextCheck {
         precondition(noChapterText.contains("问题：他刚才说了什么"))
     }
 
-    private static func checkMissingKeyHint() {
+    private static func checkKeyResolveSaveAndEntry() {
         precondition(
-            WatchQAAPIKey.missingKeyHint
-                == "未配置密钥，终端执行 defaults write com.mg.replay AnthropicAPIKey -string sk-…"
+            WatchQAAPIKey.terminalCommand
+                == "defaults write com.mg.replay AnthropicAPIKey -string sk-…"
         )
         let suite = "qa.context.check.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
+
+        // resolve：defaults 优先于环境变量，二者皆空返回 nil。
         precondition(WatchQAAPIKey.resolve(defaults: defaults, environment: [:]) == nil)
         defaults.set("sk-from-defaults", forKey: WatchQAAPIKey.defaultsKey)
         precondition(
@@ -213,7 +215,23 @@ struct QAContextCheck {
                 environment: [WatchQAAPIKey.environmentKey: "sk-from-env"]
             ) == "sk-from-env"
         )
+
+        // save：界面写入落到 defaults，随即被 resolve 读回。
+        WatchQAAPIKey.save("sk-saved-inapp", defaults: defaults)
+        precondition(
+            WatchQAAPIKey.resolve(defaults: defaults, environment: [:]) == "sk-saved-inapp",
+            "界面保存的密钥须能被 resolve 读回"
+        )
         defaults.removePersistentDomain(forName: suite)
+
+        // 引导态输入的纯逻辑：规范化、可保存、前缀提醒。
+        precondition(WatchQAKeyEntry.normalized("  sk-x  ") == "sk-x", "写入值须去首尾空白")
+        precondition(!WatchQAKeyEntry.canSave("   "), "全空白不可保存")
+        precondition(WatchQAKeyEntry.canSave("  sk-x "), "去空白后非空可保存")
+        precondition(!WatchQAKeyEntry.needsPrefixWarning("  sk-live "), "sk- 开头不提醒")
+        precondition(WatchQAKeyEntry.needsPrefixWarning("live-123"), "非 sk- 开头须提醒")
+        precondition(!WatchQAKeyEntry.needsPrefixWarning("   "), "空内容不提醒（按钮已禁用）")
+        precondition(WatchQAKeyEntry.prefixWarning == "密钥一般以 sk- 开头，确认粘贴完整")
     }
 
     private static func requestJSON(from input: WatchQARequestInput) -> [String: Any] {

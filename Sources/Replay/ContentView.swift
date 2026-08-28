@@ -902,6 +902,7 @@ private struct VideoDetail: View {
     @State private var volumeHUDDismissalTask: Task<Void, Never>?
     @StateObject private var watchQA = WatchQASession()
     @FocusState private var isQuestionFieldFocused: Bool
+    @FocusState private var isKeyFieldFocused: Bool
     @State private var qaEntries: [WatchQAEntry] = []
     @State private var qaLoadTask: Task<Void, Never>?
     let item: WatchItem
@@ -947,12 +948,16 @@ private struct VideoDetail: View {
         }
         .onChange(of: watchQA.isPresented) { presented in
             if presented {
-                DispatchQueue.main.async {
-                    isQuestionFieldFocused = true
-                }
+                focusWatchQAField()
             } else {
                 isQuestionFieldFocused = false
+                isKeyFieldFocused = false
             }
+        }
+        .onChange(of: watchQA.mode) { _ in
+            // 引导态保存后切回提问态（面板不重开），焦点随之从密钥框落到问题框。
+            guard watchQA.isPresented else { return }
+            focusWatchQAField()
         }
         .onReceive(NotificationCenter.default.publisher(for: .replayTextFocusShouldResign)) { notification in
             guard watchQA.isPresented, TextFocusResignReason.from(notification) == .escape else { return }
@@ -1178,6 +1183,8 @@ private struct VideoDetail: View {
                 WatchQAOverlay(
                     session: watchQA,
                     isQuestionFieldFocused: $isQuestionFieldFocused,
+                    isKeyFieldFocused: $isKeyFieldFocused,
+                    onSaveKey: { watchQA.saveKey() },
                     onSubmit: {
                         let itemID = item.id
                         watchQA.submit(
@@ -1233,6 +1240,21 @@ private struct VideoDetail: View {
         )
         if next != current {
             sidePaneModeRaw = next.rawValue
+        }
+    }
+
+    /// 按当前浮层态把焦点落到对应输入框：提问态落问题框，引导态落密钥框。
+    /// 下一轮 runloop 再设，等浮层内容切换完成后焦点才生效。
+    private func focusWatchQAField() {
+        DispatchQueue.main.async {
+            switch watchQA.mode {
+            case .keyGuide:
+                isQuestionFieldFocused = false
+                isKeyFieldFocused = true
+            case .ask:
+                isKeyFieldFocused = false
+                isQuestionFieldFocused = true
+            }
         }
     }
 
