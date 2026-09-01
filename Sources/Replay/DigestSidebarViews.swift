@@ -162,6 +162,7 @@ struct DigestOverviewPage: View {
     let hasSubtitles: Bool
     let currentTime: Double
     let timeColumnWidth: CGFloat
+    let shouldAutoGenerate: Bool
     let generate: () -> Void
     let seek: (Double) -> Void
 
@@ -180,6 +181,13 @@ struct DigestOverviewPage: View {
                 emptyState
             }
         }
+        .onAppear(perform: autoGenerateIfNeeded)
+        .onChange(of: hasSubtitles) { _ in autoGenerateIfNeeded() }
+    }
+
+    private func autoGenerateIfNeeded() {
+        guard shouldAutoGenerate, hasAPIKey, hasSubtitles, overview == nil, !isGenerating else { return }
+        generate()
     }
 
     private var toolbar: some View {
@@ -266,7 +274,7 @@ struct DigestOverviewPage: View {
                         digestTimeRow(
                             time: quote.timestampSeconds,
                             title: quote.quote,
-                            detail: nil,
+                            detail: quote.translation.isEmpty ? nil : quote.translation,
                             isCurrent: false,
                             timeColumnWidth: timeColumnWidth,
                             seek: seek

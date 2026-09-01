@@ -17,6 +17,8 @@ struct DigestAPICheck {
     private static func checkExplainPrompt() {
         precondition(DigestExplainPrompt.systemPrompt.contains("1 到 3 句") || DigestExplainPrompt.systemPrompt.contains("1到3句"))
         precondition(DigestExplainPrompt.systemPrompt.contains("最多"))
+        precondition(DigestExplainPrompt.systemPrompt.contains("简体中文"))
+        precondition(DigestExplainPrompt.systemPrompt.contains("不得写成英文句子"))
         let user = DigestExplainPrompt.userText(
             videoTitle: "Demo",
             selected: "transformer",
@@ -28,6 +30,7 @@ struct DigestAPICheck {
 
         let emptyContext = DigestExplainPrompt.userText(videoTitle: "Demo", selected: "x", context: "  ")
         precondition(emptyContext.contains("CONTEXT: None"))
+        precondition(user.contains("简体中文"))
 
         let cues = [
             VideoSubtitleCue(startTime: 0, endTime: 2, text: "one"),

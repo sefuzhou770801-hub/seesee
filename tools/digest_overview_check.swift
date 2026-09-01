@@ -42,6 +42,11 @@ struct DigestOverviewCheck {
         precondition(prompt.contains("7:30"), "lateThreshold 须写入提示词，实际未含 7:30")
         precondition(prompt.contains("10:00"))
         precondition(prompt.contains("Do NOT stop partway through"))
+        precondition(prompt.contains("简体中文"), "章节必须强制简体中文")
+        precondition(prompt.contains("translation"), "金句须带中文翻译字段")
+        precondition(!prompt.contains("same language as the transcript"))
+        let user = DigestOverviewPrompt.userPrompt(title: "Talk", author: "A", duration: 600, transcript: "[0:00] hi")
+        precondition(user.contains("简体中文"))
 
         let early = [
             DigestGeneratedChapter(title: "开场", timestamp: "0:00", timestampSeconds: 0, summary: ""),
@@ -63,7 +68,7 @@ struct DigestOverviewCheck {
             {"title": "结论", "timestamp": "8:10", "timestampSeconds": 490, "summary": "收束"}
           ],
           "keyQuotes": [
-            {"quote": "Keep the speaker's voice", "timestamp": "2:30", "timestampSeconds": 150}
+            {"quote": "Keep the speaker's voice", "translation": "保留说话人的原话", "timestamp": "2:30", "timestampSeconds": 150}
           ]
         }
         """
@@ -73,6 +78,7 @@ struct DigestOverviewCheck {
         precondition(parsed?.chapters[1].timestampSeconds == 490)
         precondition(parsed?.keyQuotes.count == 1)
         precondition(parsed?.keyQuotes[0].quote == "Keep the speaker's voice")
+        precondition(parsed?.keyQuotes[0].translation == "保留说话人的原话")
 
         let fenced = """
         ```json
@@ -109,7 +115,7 @@ struct DigestOverviewCheck {
                 DigestGeneratedChapter(title: "开场", timestamp: "0:00", timestampSeconds: 0, summary: "介绍")
             ],
             keyQuotes: [
-                DigestKeyQuote(quote: "hello", timestamp: "0:15", timestampSeconds: 15)
+                DigestKeyQuote(quote: "hello", translation: "你好", timestamp: "0:15", timestampSeconds: 15)
             ]
         )
         let record = DigestOverviewRecord(
@@ -126,8 +132,23 @@ struct DigestOverviewCheck {
         precondition(loaded?.payload.chapters.count == 1)
         precondition(loaded?.payload.chapters[0].title == "开场")
         precondition(loaded?.payload.keyQuotes[0].quote == "hello")
+        precondition(loaded?.payload.keyQuotes[0].translation == "你好")
         precondition(loaded?.model == "claude-sonnet-5")
+        precondition(loaded?.language == "zh-Hans")
+        precondition(loaded?.schemaVersion == 2)
         precondition(loaded?.generatedAt.timeIntervalSince1970 == 1_700_000_000)
+
+        let stale = DigestOverviewRecord(
+            payload: payload,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            model: "claude-sonnet-5",
+            language: "",
+            schemaVersion: 1
+        )
+        let staleID = UUID()
+        try DigestOverviewStore.save(stale, itemID: staleID, folder: folder)
+        precondition(DigestOverviewStore.fileExists(itemID: staleID, folder: folder))
+        precondition(DigestOverviewStore.load(itemID: staleID, folder: folder) == nil, "旧英文缓存必须视为无效")
 
         let missingID = UUID()
         precondition(DigestOverviewStore.load(itemID: missingID, folder: folder) == nil)

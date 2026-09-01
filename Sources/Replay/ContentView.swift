@@ -2119,6 +2119,7 @@ private struct ChapterSidebar: View {
                         hasSubtitles: hasSubtitleSource || !subtitleCues.isEmpty,
                         currentTime: currentTime,
                         timeColumnWidth: timeColumnWidth,
+                        shouldAutoGenerate: digest.shouldAutoGenerateOverview,
                         generate: {
                             digest.generateOverview(
                                 title: itemTitle,

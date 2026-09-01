@@ -44,17 +44,19 @@ struct DigestGeneratedChapter: Codable, Equatable, Identifiable {
 
 struct DigestKeyQuote: Codable, Equatable, Identifiable {
     var quote: String
+    var translation: String
     var timestamp: String
     var timestampSeconds: Double
 
     var id: String { "\(timestampSeconds)-\(quote)" }
 
     enum CodingKeys: String, CodingKey {
-        case quote, timestamp, timestampSeconds
+        case quote, translation, timestamp, timestampSeconds
     }
 
-    init(quote: String, timestamp: String, timestampSeconds: Double) {
+    init(quote: String, translation: String = "", timestamp: String, timestampSeconds: Double) {
         self.quote = quote
+        self.translation = translation
         self.timestamp = timestamp
         self.timestampSeconds = timestampSeconds
     }
@@ -62,6 +64,7 @@ struct DigestKeyQuote: Codable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         quote = try container.decode(String.self, forKey: .quote)
+        translation = (try? container.decode(String.self, forKey: .translation)) ?? ""
         timestamp = try container.decode(String.self, forKey: .timestamp)
         if let value = try? container.decode(Double.self, forKey: .timestampSeconds) {
             timestampSeconds = value
@@ -75,6 +78,7 @@ struct DigestKeyQuote: Codable, Equatable, Identifiable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(quote, forKey: .quote)
+        try container.encode(translation, forKey: .translation)
         try container.encode(timestamp, forKey: .timestamp)
         try container.encode(timestampSeconds, forKey: .timestampSeconds)
     }
@@ -110,6 +114,49 @@ struct DigestOverviewRecord: Codable, Equatable {
     var payload: DigestOverviewPayload
     var generatedAt: Date
     var model: String
+    var language: String
+    var schemaVersion: Int
+
+    var isCurrent: Bool {
+        schemaVersion == DigestOverviewStore.currentSchemaVersion
+            && language == DigestOverviewStore.language
+    }
+
+    init(
+        payload: DigestOverviewPayload,
+        generatedAt: Date,
+        model: String,
+        language: String = DigestOverviewStore.language,
+        schemaVersion: Int = DigestOverviewStore.currentSchemaVersion
+    ) {
+        self.payload = payload
+        self.generatedAt = generatedAt
+        self.model = model
+        self.language = language
+        self.schemaVersion = schemaVersion
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case payload, generatedAt, model, language, schemaVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        payload = try container.decode(DigestOverviewPayload.self, forKey: .payload)
+        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        model = try container.decode(String.self, forKey: .model)
+        language = (try? container.decode(String.self, forKey: .language)) ?? ""
+        schemaVersion = (try? container.decode(Int.self, forKey: .schemaVersion)) ?? 1
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(payload, forKey: .payload)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(model, forKey: .model)
+        try container.encode(language, forKey: .language)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+    }
 }
 
 enum DigestTimecode {
@@ -162,7 +209,13 @@ enum DigestOverviewPrompt {
         let late = DigestTimecode.format(lateThreshold(duration: duration))
         let maxTimestampSeconds = Int(duration.rounded())
         return """
-        You're my executive assistant. I'm interested in this video. Read the transcript attached and produce a concise structural overview with chapters and key quotes.
+        You're my executive assistant. Read the transcript and produce a concise structural overview with chapters and key quotes.
+
+        【输出语言，硬性】
+        - 章节 title 和 summary 必须是简体中文。字幕即使全是英文，标题和说明也要写成中文。
+        - 禁止用英文写章节标题或说明。
+        - 金句 quote 必须保留说话人原话（字幕原文），只修正错字、标点和语气词。
+        - 每条金句必须另给 translation：一句简体中文翻译，与双语字幕一致（原文上、译文下）。
 
         You must provide:
         - Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. This video runs until \(durationFormatted). Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after \(late). Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
@@ -180,9 +233,7 @@ enum DigestOverviewPrompt {
         - Filler words (um, uh, like, you know, sort of, kind of)
         - Speech tics and false starts
         - Repeated words from stuttering
-        Keep the speaker's voice and word choices intact — just polish for readability.
-
-        Write chapter titles and summaries in the same language as the transcript (Chinese if the transcript is Chinese). Quotes stay in the speaker's language after polish.
+        Keep the speaker's voice and word choices intact in "quote". Put the Simplified Chinese translation in "translation".
 
         CRITICAL: TIMESTAMP EXTRACTION
         The transcript is formatted EXACTLY like this:
@@ -205,10 +256,10 @@ enum DigestOverviewPrompt {
         Output JSON (no markdown fences):
         {
           "chapters": [
-            {"title": "Title", "timestamp": "0:00", "timestampSeconds": 0, "summary": "What this section covers"}
+            {"title": "开场与问题", "timestamp": "0:00", "timestampSeconds": 0, "summary": "这节在讲什么"}
           ],
           "keyQuotes": [
-            {"quote": "Exact quote from transcript", "timestamp": "2:30", "timestampSeconds": 150}
+            {"quote": "Exact quote from transcript", "translation": "说话人原话的简体中文翻译", "timestamp": "2:30", "timestampSeconds": 150}
           ]
         }
 
@@ -232,6 +283,8 @@ enum DigestOverviewPrompt {
         Video title: \(title)
         Channel: \(author)
         VIDEO DURATION: \(durationFormatted) (\(maxTimestampSeconds) seconds) — do not use any timestamp beyond this!
+
+        请用简体中文写章节标题和说明。金句 quote 保留原文，translation 写中文。
 
         TRANSCRIPT:
         \(transcript)
@@ -274,9 +327,15 @@ enum DigestOverviewCodec {
 
 enum DigestOverviewStore {
     static let sidecarSuffix = "digest.json"
+    static let currentSchemaVersion = 2
+    static let language = "zh-Hans"
 
     static func fileURL(itemID: UUID, in folder: URL) -> URL {
         folder.appendingPathComponent("\(itemID.uuidString).\(sidecarSuffix)")
+    }
+
+    static func fileExists(itemID: UUID, folder: URL) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(itemID: itemID, in: folder).path)
     }
 
     static func load(itemID: UUID, folder: URL) -> DigestOverviewRecord? {
@@ -287,7 +346,10 @@ enum DigestOverviewStore {
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(DigestOverviewRecord.self, from: data)
+        guard let record = try? decoder.decode(DigestOverviewRecord.self, from: data),
+              record.isCurrent
+        else { return nil }
+        return record
     }
 
     static func save(_ record: DigestOverviewRecord, itemID: UUID, folder: URL) throws {

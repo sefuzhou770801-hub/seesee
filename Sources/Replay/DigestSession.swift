@@ -16,6 +16,7 @@ final class DigestSession: ObservableObject {
     @Published var pendingDeletions: [UUID: Date] = [:]
     @Published var noteJustSaved = false
     @Published var explainNeedsRetry = false
+    @Published var shouldAutoGenerateOverview = false
 
     private var itemID: UUID?
     private var folder: URL?
@@ -35,7 +36,13 @@ final class DigestSession: ObservableObject {
         self.folder = folder
         notes = DigestNotesStore.load(itemID: itemID, folder: folder)
             .sorted { $0.createdAt > $1.createdAt }
-        overview = DigestOverviewStore.load(itemID: itemID, folder: folder)?.payload
+        if let record = DigestOverviewStore.load(itemID: itemID, folder: folder) {
+            overview = record.payload
+            shouldAutoGenerateOverview = false
+        } else {
+            overview = nil
+            shouldAutoGenerateOverview = DigestOverviewStore.fileExists(itemID: itemID, folder: folder)
+        }
         isGeneratingOverview = false
         overviewMessage = nil
         pendingDeletions = [:]
@@ -171,6 +178,7 @@ final class DigestSession: ObservableObject {
 
         isGeneratingOverview = true
         overviewMessage = nil
+        shouldAutoGenerateOverview = false
         overviewTask?.cancel()
         overviewTask = Task { [weak self] in
             do {

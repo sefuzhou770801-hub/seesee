@@ -9,7 +9,7 @@ enum DigestExplainPrompt {
     - 如果是词或术语：给简短定义
     - 如果是短语或论断：结合上下文解释含义
     - 不要套话，不要写「这指的是」，直接解释
-    - 用中文，专名可保留原文
+    - 必须用简体中文作答。解释正文不得写成英文句子；专名、术语原文可以夹在中文里。
     """
 
     static let maxTokens = 256
@@ -23,7 +23,7 @@ enum DigestExplainPrompt {
 
         CONTEXT: \(contextLine.isEmpty ? "None" : contextLine)
 
-        Explain briefly.
+        请用简体中文简要解释。
         """
     }
 
