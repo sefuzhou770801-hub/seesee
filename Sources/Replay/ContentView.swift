@@ -2200,15 +2200,25 @@ private struct ChapterSidebar: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            modeToggle
+        HStack(spacing: DigestModeTabMetrics.headerSpacing) {
+            DigestModeTabs(selected: effectiveMode) { mode in
+                onUserPickedMode()
+                sidePaneModeRaw = mode.rawValue
+            }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: DigestModeTabMetrics.headerSpacing)
 
             if isPresented {
                 TitlebarInteractiveHost {
                     Button(action: toggle) {
                         Image(systemName: "sidebar.trailing")
+                            .font(.system(size: DigestModeTabMetrics.fontSize, weight: .medium))
+                            .foregroundStyle(OpenMyChrome.ink)
+                            .frame(
+                                width: DigestModeTabMetrics.closeButtonSize,
+                                height: DigestModeTabMetrics.closeButtonSize
+                            )
+                            .contentShape(Rectangle())
                     }
                     .watchGlassButton()
                     .help("隐藏侧栏")
@@ -2216,51 +2226,8 @@ private struct ChapterSidebar: View {
                 .fixedSize()
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 56)
-    }
-
-    private var modeToggle: some View {
-        HStack(spacing: 2) {
-            modeButton(
-                title: SidePaneSelection.visibleTitle(for: .lyrics),
-                mode: .lyrics
-            )
-            modeButton(
-                title: SidePaneSelection.visibleTitle(for: .overview),
-                mode: .overview
-            )
-            modeButton(
-                title: SidePaneSelection.visibleTitle(for: .notes),
-                mode: .notes
-            )
-        }
-        .padding(2)
-        .background(OpenMyChrome.raise, in: Capsule())
-    }
-
-    private func modeButton(title: String, mode: SidePaneMode) -> some View {
-        let isSelected = effectiveMode == mode
-        return Button {
-            onUserPickedMode()
-            sidePaneModeRaw = mode.rawValue
-        } label: {
-            Text(title)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
-                .foregroundStyle(isSelected ? OpenMyChrome.ink : OpenMyChrome.muted)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .frame(minWidth: 36)
-                .background {
-                    if isSelected {
-                        Capsule().fill(OpenMyChrome.canvas)
-                    }
-                }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help(title)
-        .accessibilityLabel(title)
+        .padding(.horizontal, DigestModeTabMetrics.headerHorizontalPadding)
+        .frame(height: DigestModeTabMetrics.headerHeight)
     }
 
     @ViewBuilder

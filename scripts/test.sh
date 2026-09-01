@@ -104,6 +104,12 @@ compile_and_run digest_typography_proof \
     "$project_dir/Sources/Replay/DigestCueRow.swift" \
     "$project_dir/tools/digest_typography_proof.swift"
 
+compile_and_run digest_tabs_proof \
+    "$project_dir/Sources/Replay/SidePaneSelection.swift" \
+    "$project_dir/Sources/Replay/OpenMyChrome.swift" \
+    "$project_dir/Sources/Replay/DigestModeTabs.swift" \
+    "$project_dir/tools/digest_tabs_proof.swift"
+
 compile_and_run digest_notes \
     "$project_dir/Sources/Replay/DigestNotes.swift" \
     "$project_dir/tools/digest_notes_check.swift"
