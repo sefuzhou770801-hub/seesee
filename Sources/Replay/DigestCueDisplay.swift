@@ -11,6 +11,63 @@ enum DigestCueDisplay {
     static let blockSpacing: CGFloat = 3
     static let rowVerticalPadding: CGFloat = 8
 
+    /// 时间码字体（与 SwiftUI `.system(size: 11).monospacedDigit()` 同一套）。
+    static var timeFont: NSFont {
+        NSFont.monospacedDigitSystemFont(ofSize: originalSize, weight: .regular)
+    }
+
+    /// SwiftUI 时间码 Text 顶到基线的距离。
+    static var timeBaselineFromTop: CGFloat {
+        timeFont.ascender
+    }
+
+    /// NSTextView 顶（inset=0、padding=0）到英文首行基线的距离。
+    /// 强制行高会在字模上方留空，所以不能用 font.ascender 代替。
+    static var firstLineBaselineFromTop: CGFloat {
+        let sample = NSAttributedString(
+            string: "Hello world.",
+            attributes: attributes(
+                size: originalSize,
+                lineMultiple: originalLineMultiple,
+                paragraphSpacing: 0,
+                weight: .regular,
+                color: .white
+            )
+        )
+        let storage = NSTextStorage(attributedString: sample)
+        let manager = NSLayoutManager()
+        manager.usesFontLeading = false
+        let container = NSTextContainer(size: NSSize(width: 400, height: 200))
+        container.lineFragmentPadding = 0
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        manager.ensureLayout(for: container)
+        guard manager.numberOfGlyphs > 0 else { return timeBaselineFromTop }
+        let fragment = manager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        let location = manager.location(forGlyphAt: 0)
+        return fragment.minY + location.y
+    }
+
+    static func blockHeight(for text: String, width: CGFloat) -> CGFloat {
+        let attributed = attributedString(
+            text: text,
+            query: "",
+            isCurrent: false,
+            originalColor: .white,
+            translationColor: .white
+        )
+        let storage = NSTextStorage(attributedString: attributed)
+        let manager = NSLayoutManager()
+        manager.usesFontLeading = false
+        let container = NSTextContainer(size: NSSize(width: max(width, 1), height: 10_000))
+        container.lineFragmentPadding = 0
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        manager.ensureLayout(for: container)
+        let used = manager.usedRect(for: container).height
+        return max(ceil(used), ceil(translationSize * translationLineMultiple))
+    }
+
     struct Lines: Equatable {
         var original: String?
         var translation: String
@@ -68,7 +125,7 @@ enum DigestCueDisplay {
         return result
     }
 
-    private static func attributes(
+    static func attributes(
         size: CGFloat,
         lineMultiple: CGFloat,
         paragraphSpacing: CGFloat,

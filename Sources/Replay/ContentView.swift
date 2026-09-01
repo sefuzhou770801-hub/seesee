@@ -2292,29 +2292,16 @@ private struct ChapterSidebar: View {
                                 let isHit = searchHits.contains(index)
                                 let isActiveHit = searchHits.indices.contains(searchActive) && searchHits[searchActive] == index
                                 VStack(alignment: .leading, spacing: DigestCueDisplay.pairSpacing) {
-                                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                        Button {
-                                            jumpToCue(index: index)
-                                        } label: {
-                                            Text(formatTime(cue.startTime))
-                                                .font(.system(size: 11).monospacedDigit())
-                                                .foregroundStyle(isCurrent ? OpenMyChrome.ink : OpenMyChrome.muted)
-                                                .frame(width: timeColumnWidth, alignment: .trailing)
-                                                .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
-                                        .help("跳到这句")
-
-                                        SelectableCueText(
-                                            text: cue.text,
-                                            query: searchQuery,
-                                            isCurrent: isCurrent,
-                                            onSeek: { jumpToCue(index: index) },
-                                            onSelection: { digest.selectText($0, cueIndex: index, time: cue.startTime) },
-                                            onClearSelection: {}
-                                        )
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
+                                    DigestCueRow(
+                                        timeLabel: formatTime(cue.startTime),
+                                        cueText: cue.text,
+                                        timeColumnWidth: timeColumnWidth,
+                                        isCurrent: isCurrent,
+                                        query: searchQuery,
+                                        onSeek: { jumpToCue(index: index) },
+                                        onSelection: { digest.selectText($0, cueIndex: index, time: cue.startTime) }
+                                    )
+                                    .help("跳到这句")
 
                                     if digest.selectedCueIndex == index, !digest.selectedText.isEmpty {
                                         DigestSelectionBar(

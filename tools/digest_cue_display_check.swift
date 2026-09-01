@@ -20,6 +20,10 @@ struct DigestCueDisplayCheck {
         precondition((2...3).contains(DigestCueDisplay.pairSpacing))
         precondition(DigestCueDisplay.blockSpacing == 3)
         precondition(DigestCueDisplay.rowVerticalPadding == 8)
+        let first = DigestCueDisplay.firstLineBaselineFromTop
+        let time = DigestCueDisplay.timeBaselineFromTop
+        precondition(first > 0 && first < 24, "英文首行基线须在句块顶部附近，实际 \(first)")
+        precondition(time > 0 && time < 24, "时间码基线须在字号范围内，实际 \(time)")
     }
 
     private static func checkLineOrderAndSpacing() {
