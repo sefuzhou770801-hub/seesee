@@ -2140,9 +2140,11 @@ private struct ChapterSidebar: View {
                 case .notes:
                     DigestNotesPage(
                         notes: digest.notes,
+                        pendingIDs: Set(digest.pendingDeletions.keys),
                         timeColumnWidth: timeColumnWidth,
                         seek: selectCueTime,
-                        delete: digest.deleteNote
+                        delete: digest.requestDeleteNote,
+                        undo: digest.undoDeleteNote
                     )
                 }
             }
@@ -2274,13 +2276,19 @@ private struct ChapterSidebar: View {
                                         DigestSelectionBar(
                                             canUseModel: digest.hasAPIKey,
                                             isExplaining: digest.isExplaining,
+                                            noteSaved: digest.noteJustSaved,
                                             onExplain: {
                                                 digest.explainSelection(title: itemTitle, cues: displayCues)
                                             },
                                             onSaveNote: { _ = digest.saveSelectedNote() }
                                         )
                                         .padding(.leading, timeColumnWidth + 10)
-                                        if let explanation = digest.explanation {
+                                        if digest.explainNeedsRetry {
+                                            DigestExplainRetryBar {
+                                                digest.explainSelection(title: itemTitle, cues: displayCues)
+                                            }
+                                            .padding(.leading, timeColumnWidth + 10)
+                                        } else if let explanation = digest.explanation {
                                             DigestExplainBubble(text: explanation)
                                                 .padding(.leading, timeColumnWidth + 10)
                                         }

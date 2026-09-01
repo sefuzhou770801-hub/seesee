@@ -13,11 +13,16 @@ final class DigestSession: ObservableObject {
     @Published var explanation: String?
     @Published var isExplaining = false
     @Published var explainMessage: String?
+    @Published var pendingDeletions: [UUID: Date] = [:]
+    @Published var noteJustSaved = false
+    @Published var explainNeedsRetry = false
 
     private var itemID: UUID?
     private var folder: URL?
     private var explainTask: Task<Void, Never>?
     private var overviewTask: Task<Void, Never>?
+    private var noteDeleteTask: Task<Void, Never>?
+    private var noteSavedTask: Task<Void, Never>?
 
     var hasAPIKey: Bool {
         DigestAPIKey.resolve() != nil
@@ -33,6 +38,11 @@ final class DigestSession: ObservableObject {
         overview = DigestOverviewStore.load(itemID: itemID, folder: folder)?.payload
         isGeneratingOverview = false
         overviewMessage = nil
+        pendingDeletions = [:]
+        noteJustSaved = false
+        explainNeedsRetry = false
+        noteDeleteTask?.cancel()
+        noteSavedTask?.cancel()
         clearSelection()
     }
 
@@ -43,6 +53,7 @@ final class DigestSession: ObservableObject {
         explanation = nil
         isExplaining = false
         explainMessage = nil
+        explainNeedsRetry = false
         explainTask?.cancel()
         explainTask = nil
     }
@@ -58,6 +69,7 @@ final class DigestSession: ObservableObject {
         if selectedCueIndex != cueIndex || selectedText != trimmed {
             explanation = nil
             explainMessage = nil
+            explainNeedsRetry = false
         }
         selectedText = trimmed
         selectedCueIndex = cueIndex
@@ -66,6 +78,7 @@ final class DigestSession: ObservableObject {
 
     @discardableResult
     func saveSelectedNote() -> DigestNote? {
+        guard !noteJustSaved else { return nil }
         let text = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let itemID, let folder else { return nil }
         let note = DigestNote(id: UUID(), time: selectedCueTime, text: text, createdAt: Date())
@@ -74,20 +87,57 @@ final class DigestSession: ObservableObject {
         do {
             try DigestNotesStore.save(next, itemID: itemID, folder: folder)
             notes = next
+            noteJustSaved = true
+            noteSavedTask?.cancel()
+            noteSavedTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled else { return }
+                self?.noteJustSaved = false
+            }
             return note
         } catch {
             return nil
         }
     }
 
-    func deleteNote(_ id: UUID) {
+    func requestDeleteNote(_ id: UUID) {
+        guard notes.contains(where: { $0.id == id }) else { return }
+        DigestNoteUndo.request(pending: &pendingDeletions, id: id)
+        scheduleDeletionCommit()
+    }
+
+    func undoDeleteNote(_ id: UUID) {
+        DigestNoteUndo.undo(pending: &pendingDeletions, id: id)
+    }
+
+    func commitExpiredDeletions(now: Date = Date()) {
+        let expired = DigestNoteUndo.expiredIDs(pending: pendingDeletions, now: now)
+        guard !expired.isEmpty else { return }
+        notes.removeAll { expired.contains($0.id) }
+        for id in expired {
+            pendingDeletions.removeValue(forKey: id)
+        }
+        persistNotes()
+    }
+
+    private func persistNotes() {
         guard let itemID, let folder else { return }
-        let next = notes.filter { $0.id != id }
-        do {
-            try DigestNotesStore.save(next, itemID: itemID, folder: folder)
-            notes = next
-        } catch {
-            return
+        try? DigestNotesStore.save(notes, itemID: itemID, folder: folder)
+    }
+
+    private func scheduleDeletionCommit() {
+        noteDeleteTask?.cancel()
+        noteDeleteTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let session = self else { return }
+                let now = Date()
+                session.commitExpiredDeletions(now: now)
+                guard let next = session.pendingDeletions.values.min() else { return }
+                let wait = next.timeIntervalSince(now)
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                }
+            }
         }
     }
 
@@ -193,8 +243,18 @@ final class DigestSession: ObservableObject {
                     provider: provider
                 )
                 guard !Task.isCancelled else { return }
-                self?.explanation = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 self?.isExplaining = false
+                let trimmedAnswer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                switch DigestExplainQuality.verdict(selected: selected, explanation: trimmedAnswer) {
+                case .ok:
+                    self?.explanation = trimmedAnswer
+                    self?.explainNeedsRetry = false
+                    self?.explainMessage = nil
+                case .empty, .tooShort, .unrelated:
+                    self?.explanation = nil
+                    self?.explainNeedsRetry = true
+                    self?.explainMessage = nil
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 self?.isExplaining = false

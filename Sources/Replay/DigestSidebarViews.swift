@@ -72,6 +72,7 @@ struct DigestSearchBar: View {
 struct DigestSelectionBar: View {
     let canUseModel: Bool
     let isExplaining: Bool
+    let noteSaved: Bool
     let onExplain: () -> Void
     let onSaveNote: () -> Void
 
@@ -86,12 +87,13 @@ struct DigestSelectionBar: View {
             .watchGlassButton(prominent: true)
             .disabled(isExplaining || !canUseModel)
             Button(action: onSaveNote) {
-                Text("存笔记")
+                Text(noteSaved ? "已存" : "存笔记")
                     .font(.system(size: 11, weight: .medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
             }
             .watchGlassButton()
+            .disabled(noteSaved)
             if !canUseModel {
                 Text(DigestRequestBuilder.missingKeyHint)
                     .font(.system(size: 10))
@@ -100,6 +102,34 @@ struct DigestSelectionBar: View {
             Spacer(minLength: 0)
         }
         .padding(.top, 4)
+    }
+}
+
+struct DigestExplainRetryBar: View {
+    let onRetry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(DigestExplainQuality.retryPrompt)
+                .font(.system(size: 12))
+                .foregroundStyle(OpenMyChrome.ink)
+            Spacer(minLength: 0)
+            Button(action: onRetry) {
+                Text("重试")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+            }
+            .watchGlassButton(prominent: true)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(OpenMyChrome.raise, in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusSm, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: OpenMyChrome.radiusSm, style: .continuous)
+                .strokeBorder(OpenMyChrome.hair)
+        }
     }
 }
 
@@ -135,16 +165,19 @@ struct DigestOverviewPage: View {
     let generate: () -> Void
     let seek: (Double) -> Void
 
+    private var hasNative: Bool { !nativeChapters.isEmpty }
+    private var hasAIChapters: Bool { !(overview?.chapters.isEmpty ?? true) }
+    private var hasQuotes: Bool { !(overview?.keyQuotes.isEmpty ?? true) }
+    private var hasListContent: Bool { hasNative || hasAIChapters || hasQuotes }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             toolbar
             Divider()
-            if let overview, !overview.chapters.isEmpty || !overview.keyQuotes.isEmpty {
-                generatedList(overview)
-            } else if nativeChapters.isEmpty {
-                emptyState
+            if hasListContent {
+                combinedList
             } else {
-                nativeList
+                emptyState
             }
         }
     }
@@ -189,23 +222,18 @@ struct DigestOverviewPage: View {
         }
     }
 
-    private var nativeList: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let message, !message.isEmpty {
-                Text(message)
-                    .font(.system(size: 11))
-                    .foregroundStyle(OpenMyChrome.muted)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-            }
-            Text("视频自带章节")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(OpenMyChrome.muted)
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
+    private var combinedList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
+                if let message, !message.isEmpty {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(OpenMyChrome.muted)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                }
+                if hasNative {
+                    sectionLabel("视频自带章节")
                     ForEach(nativeChapters) { chapter in
                         digestTimeRow(
                             time: chapter.startTime,
@@ -217,35 +245,21 @@ struct DigestOverviewPage: View {
                         )
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-            }
-            .scrollIndicators(.hidden)
-        }
-    }
-
-    private func generatedList(_ overview: DigestOverviewPayload) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
-                if let message, !message.isEmpty {
-                    Text(message)
-                        .font(.system(size: 11))
-                        .foregroundStyle(OpenMyChrome.muted)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                if hasAIChapters, let overview {
+                    sectionLabel("AI 章节")
+                        .padding(.top, hasNative ? 8 : 0)
+                    ForEach(overview.chapters) { chapter in
+                        digestTimeRow(
+                            time: chapter.timestampSeconds,
+                            title: chapter.title,
+                            detail: chapter.summary.isEmpty ? nil : chapter.summary,
+                            isCurrent: isCurrentGenerated(chapter, in: overview.chapters),
+                            timeColumnWidth: timeColumnWidth,
+                            seek: seek
+                        )
+                    }
                 }
-                sectionLabel("章节")
-                ForEach(overview.chapters) { chapter in
-                    digestTimeRow(
-                        time: chapter.timestampSeconds,
-                        title: chapter.title,
-                        detail: chapter.summary.isEmpty ? nil : chapter.summary,
-                        isCurrent: isCurrentGenerated(chapter, in: overview.chapters),
-                        timeColumnWidth: timeColumnWidth,
-                        seek: seek
-                    )
-                }
-                if !overview.keyQuotes.isEmpty {
+                if hasQuotes, let overview {
                     sectionLabel("金句")
                         .padding(.top, 8)
                     ForEach(overview.keyQuotes) { quote in
@@ -293,11 +307,47 @@ struct DigestOverviewPage: View {
     }
 }
 
+struct DigestNoteUndoBar: View {
+    let onUndo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("已删除")
+                .font(.system(size: 13))
+                .foregroundStyle(OpenMyChrome.muted)
+            Spacer(minLength: 0)
+            Button("撤销", action: onUndo)
+                .font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .foregroundStyle(OpenMyChrome.ink)
+                .background(OpenMyChrome.canvas, in: Capsule())
+                .overlay {
+                    Capsule().strokeBorder(OpenMyChrome.hair)
+                }
+                .contentShape(Capsule())
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .padding(.vertical, DigestCueDisplay.rowVerticalPadding)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(OpenMyChrome.raise.opacity(0.88))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(OpenMyChrome.hair)
+        }
+    }
+}
+
 struct DigestNotesPage: View {
     let notes: [DigestNote]
+    let pendingIDs: Set<UUID>
     let timeColumnWidth: CGFloat
     let seek: (Double) -> Void
     let delete: (UUID) -> Void
+    let undo: (UUID) -> Void
 
     var body: some View {
         if notes.isEmpty {
@@ -309,48 +359,10 @@ struct DigestNotesPage: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
                     ForEach(notes) { note in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Button {
-                                seek(note.time)
-                            } label: {
-                                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                    Text(DigestTimecode.format(note.time))
-                                        .font(.system(size: 11).monospacedDigit())
-                                        .foregroundStyle(OpenMyChrome.muted)
-                                        .frame(width: timeColumnWidth, alignment: .trailing)
-                                    Text(SubtitleSentenceBlocks.withCJKLatinSpacing(note.text))
-                                        .font(.system(size: DigestCueDisplay.translationSize))
-                                        .foregroundStyle(OpenMyChrome.ink)
-                                        .multilineTextAlignment(.leading)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    Spacer(minLength: 0)
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .help("跳到笔记时刻")
-
-                            Button {
-                                delete(note.id)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(OpenMyChrome.muted)
-                                    .frame(width: 22, height: 22)
-                            }
-                            .buttonStyle(.plain)
-                            .help("删除笔记")
-                        }
-                        .padding(.leading, 10)
-                        .padding(.trailing, 8)
-                        .padding(.vertical, DigestCueDisplay.rowVerticalPadding)
-                        .background {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(OpenMyChrome.raise.opacity(0.88))
-                        }
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(OpenMyChrome.hair)
+                        if pendingIDs.contains(note.id) {
+                            DigestNoteUndoBar(onUndo: { undo(note.id) })
+                        } else {
+                            noteRow(note)
                         }
                     }
                 }
@@ -358,6 +370,52 @@ struct DigestNotesPage: View {
                 .padding(.vertical, 8)
             }
             .scrollIndicators(.hidden)
+        }
+    }
+
+    private func noteRow(_ note: DigestNote) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Button {
+                seek(note.time)
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(DigestTimecode.format(note.time))
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(OpenMyChrome.muted)
+                        .frame(width: timeColumnWidth, alignment: .trailing)
+                    Text(SubtitleSentenceBlocks.withCJKLatinSpacing(note.text))
+                        .font(.system(size: DigestCueDisplay.translationSize))
+                        .foregroundStyle(OpenMyChrome.ink)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("跳到笔记时刻")
+
+            Button {
+                delete(note.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundStyle(OpenMyChrome.muted)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help("删除笔记")
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .padding(.vertical, DigestCueDisplay.rowVerticalPadding)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(OpenMyChrome.raise.opacity(0.88))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(OpenMyChrome.hair)
         }
     }
 }
