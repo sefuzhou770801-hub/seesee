@@ -1,30 +1,6 @@
 import AppKit
 import SwiftUI
 
-enum DigestCueDisplay {
-    struct Lines: Equatable {
-        var secondary: String?
-        var primary: String
-    }
-
-    static func lines(from text: String) -> Lines {
-        let parts = text
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        let translation = parts.dropFirst().joined(separator: "\n")
-        let isDuplicated = parts.count >= 2 && translation == parts[0]
-        if parts.count >= 2, !isDuplicated {
-            return Lines(
-                secondary: SubtitleSentenceBlocks.withCJKLatinSpacing(parts[0]),
-                primary: SubtitleSentenceBlocks.withCJKLatinSpacing(parts.dropFirst().joined(separator: "\n"))
-            )
-        }
-        let body = isDuplicated ? translation : (parts.first ?? text)
-        return Lines(secondary: nil, primary: SubtitleSentenceBlocks.withCJKLatinSpacing(body))
-    }
-}
-
 struct DigestSearchBar: View {
     @Binding var query: String
     let matchCount: Int
@@ -229,7 +205,7 @@ struct DigestOverviewPage: View {
                 .padding(.top, 10)
                 .padding(.bottom, 4)
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
+                LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
                     ForEach(nativeChapters) { chapter in
                         digestTimeRow(
                             time: chapter.startTime,
@@ -250,7 +226,7 @@ struct DigestOverviewPage: View {
 
     private func generatedList(_ overview: DigestOverviewPayload) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 3) {
+            LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
                 if let message, !message.isEmpty {
                     Text(message)
                         .font(.system(size: 11))
@@ -331,7 +307,7 @@ struct DigestNotesPage: View {
             )
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
+                LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
                     ForEach(notes) { note in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Button {
@@ -340,11 +316,11 @@ struct DigestNotesPage: View {
                                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                                     Text(DigestTimecode.format(note.time))
                                         .font(.system(size: 11).monospacedDigit())
-                                        .foregroundStyle(Color.secondary)
+                                        .foregroundStyle(OpenMyChrome.muted)
                                         .frame(width: timeColumnWidth, alignment: .trailing)
                                     Text(SubtitleSentenceBlocks.withCJKLatinSpacing(note.text))
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(.primary)
+                                        .font(.system(size: DigestCueDisplay.translationSize))
+                                        .foregroundStyle(OpenMyChrome.ink)
                                         .multilineTextAlignment(.leading)
                                         .fixedSize(horizontal: false, vertical: true)
                                     Spacer(minLength: 0)
@@ -367,7 +343,7 @@ struct DigestNotesPage: View {
                         }
                         .padding(.leading, 10)
                         .padding(.trailing, 8)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, DigestCueDisplay.rowVerticalPadding)
                         .background {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .fill(OpenMyChrome.raise.opacity(0.88))
@@ -400,18 +376,18 @@ func digestTimeRow(
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(DigestTimecode.format(time))
                 .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
+                .foregroundStyle(isCurrent ? OpenMyChrome.ink : OpenMyChrome.muted)
                 .frame(width: timeColumnWidth, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: DigestCueDisplay.pairSpacing) {
                 Text(SubtitleSentenceBlocks.withCJKLatinSpacing(title))
-                    .font(.system(size: 13, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(.primary)
+                    .font(.system(size: DigestCueDisplay.translationSize, weight: isCurrent ? .semibold : .regular))
+                    .foregroundStyle(OpenMyChrome.ink)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail, !detail.isEmpty {
                     Text(SubtitleSentenceBlocks.withCJKLatinSpacing(detail))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: DigestCueDisplay.originalSize))
+                        .foregroundStyle(OpenMyChrome.muted)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -420,7 +396,7 @@ func digestTimeRow(
         }
         .padding(.leading, 10)
         .padding(.trailing, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, DigestCueDisplay.rowVerticalPadding)
         .background {
             if isCurrent {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -480,7 +456,12 @@ struct SelectableCueText: NSViewRepresentable {
         view.setContentCompressionResistancePriority(.required, for: .vertical)
         view.focusRingType = .none
         view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isAutomaticTextReplacementEnabled = false
+        view.isAutomaticSpellingCorrectionEnabled = false
         view.allowsUndo = false
+        view.font = NSFont.systemFont(ofSize: DigestCueDisplay.translationSize)
+        view.layoutManager?.usesFontLeading = false
         context.coordinator.parent = self
         view.onCollapsedClick = {
             context.coordinator.parent?.onSeek()
@@ -508,53 +489,29 @@ struct SelectableCueText: NSViewRepresentable {
         }
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: FittingTextView, context: Context) -> CGSize? {
+        let width = proposal.width ?? 0
+        guard width > 0 else {
+            return CGSize(width: 0, height: DigestCueDisplay.translationSize * DigestCueDisplay.translationLineMultiple)
+        }
+        nsView.textContainer?.size = NSSize(width: width, height: .greatestFiniteMagnitude)
+        nsView.layoutManager?.ensureLayout(for: nsView.textContainer!)
+        let used = nsView.layoutManager?.usedRect(for: nsView.textContainer!) ?? .zero
+        return CGSize(width: width, height: max(ceil(used.height), ceil(DigestCueDisplay.translationSize * DigestCueDisplay.translationLineMultiple)))
+    }
+
     private func apply(to view: FittingTextView, coordinator: Coordinator? = nil) {
         coordinator?.isApplying = true
-        view.textStorage?.setAttributedString(makeAttributedString())
+        let attributed = DigestCueDisplay.attributedString(
+            text: text,
+            query: query,
+            isCurrent: isCurrent,
+            originalColor: OpenMyChrome.nsMuted,
+            translationColor: OpenMyChrome.nsInk
+        )
+        view.textStorage?.setAttributedString(attributed)
+        view.hasBilingualOriginal = DigestCueDisplay.lines(from: text).original != nil
         coordinator?.isApplying = false
-    }
-
-    private func makeAttributedString() -> NSAttributedString {
-        let lines = DigestCueDisplay.lines(from: text)
-        let result = NSMutableAttributedString()
-        if let secondary = lines.secondary {
-            result.append(NSAttributedString(
-                string: secondary + "\n",
-                attributes: attributes(size: 11, weight: .regular, color: NSColor.secondaryLabelColor)
-            ))
-        }
-        result.append(NSAttributedString(
-            string: lines.primary,
-            attributes: attributes(
-                size: 13,
-                weight: isCurrent ? .semibold : .regular,
-                color: NSColor.labelColor
-            )
-        ))
-        let needle = DigestTranscriptSearch.normalizedQuery(query)
-        if !needle.isEmpty {
-            let full = result.string as NSString
-            var search = 0
-            while search < full.length {
-                let found = full.range(of: needle, options: [.caseInsensitive], range: NSRange(location: search, length: full.length - search))
-                if found.location == NSNotFound { break }
-                result.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.38), range: found)
-                search = found.location + found.length
-            }
-        }
-        return result
-    }
-
-    private func attributes(size: CGFloat, weight: NSFont.Weight, color: NSColor) -> [NSAttributedString.Key: Any] {
-        [
-            .font: NSFont.systemFont(ofSize: size, weight: weight),
-            .foregroundColor: color,
-            .paragraphStyle: {
-                let style = NSMutableParagraphStyle()
-                style.lineBreakMode = .byWordWrapping
-                return style
-            }()
-        ]
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -584,14 +541,40 @@ struct SelectableCueText: NSViewRepresentable {
 
 final class FittingTextView: NSTextView {
     var onCollapsedClick: (() -> Void)?
+    var hasBilingualOriginal = false
 
     override var intrinsicContentSize: NSSize {
         guard let textContainer, let layoutManager else {
-            return NSSize(width: NSView.noIntrinsicMetric, height: 18)
+            return NSSize(width: NSView.noIntrinsicMetric, height: ceil(DigestCueDisplay.translationSize * DigestCueDisplay.translationLineMultiple))
         }
         layoutManager.ensureLayout(for: textContainer)
         let used = layoutManager.usedRect(for: textContainer)
-        return NSSize(width: NSView.noIntrinsicMetric, height: max(18, ceil(used.height)))
+        return NSSize(
+            width: NSView.noIntrinsicMetric,
+            height: max(ceil(used.height), ceil(DigestCueDisplay.translationSize * DigestCueDisplay.translationLineMultiple))
+        )
+    }
+
+    /// 时间码与译文主行对齐：双语时跳过原文行，单行时主行就是译文。
+    override var firstBaselineOffsetFromTop: CGFloat {
+        let translationFont = NSFont.systemFont(ofSize: DigestCueDisplay.translationSize)
+        guard let layoutManager, let textContainer, layoutManager.numberOfGlyphs > 0 else {
+            return ceil(translationFont.ascender)
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        var glyphIndex = 0
+        var skippedOriginal = false
+        while glyphIndex < layoutManager.numberOfGlyphs {
+            var lineRange = NSRange()
+            let rect = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphIndex, effectiveRange: &lineRange)
+            if hasBilingualOriginal, !skippedOriginal {
+                skippedOriginal = true
+                glyphIndex = NSMaxRange(lineRange)
+                continue
+            }
+            return rect.minY + ceil(translationFont.ascender)
+        }
+        return ceil(translationFont.ascender)
     }
 
     override func layout() {

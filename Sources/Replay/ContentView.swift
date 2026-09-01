@@ -2282,7 +2282,7 @@ private struct ChapterSidebar: View {
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 3) {
+                        LazyVStack(alignment: .leading, spacing: DigestCueDisplay.blockSpacing) {
                             ForEach(qaInsertions.leading) { entry in
                                 qaCard(entry)
                             }
@@ -2291,14 +2291,14 @@ private struct ChapterSidebar: View {
                                 let isCurrent = activeCueIndex == index
                                 let isHit = searchHits.contains(index)
                                 let isActiveHit = searchHits.indices.contains(searchActive) && searchHits[searchActive] == index
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: DigestCueDisplay.pairSpacing) {
                                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                                         Button {
                                             jumpToCue(index: index)
                                         } label: {
                                             Text(formatTime(cue.startTime))
                                                 .font(.system(size: 11).monospacedDigit())
-                                                .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
+                                                .foregroundStyle(isCurrent ? OpenMyChrome.ink : OpenMyChrome.muted)
                                                 .frame(width: timeColumnWidth, alignment: .trailing)
                                                 .contentShape(Rectangle())
                                         }
@@ -2314,7 +2314,6 @@ private struct ChapterSidebar: View {
                                             onClearSelection: {}
                                         )
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                        .fixedSize(horizontal: false, vertical: true)
                                     }
 
                                     if digest.selectedCueIndex == index, !digest.selectedText.isEmpty {
@@ -2341,7 +2340,7 @@ private struct ChapterSidebar: View {
                                 }
                                 .padding(.leading, 10)
                                 .padding(.trailing, 14)
-                                .padding(.vertical, 8)
+                                .padding(.vertical, DigestCueDisplay.rowVerticalPadding)
                                 .background {
                                     if isActiveHit {
                                         RoundedRectangle(cornerRadius: 10, style: .continuous)

@@ -88,6 +88,13 @@ compile_and_run digest_search \
     "$project_dir/Sources/Replay/DigestTranscriptSearch.swift" \
     "$project_dir/tools/digest_search_check.swift"
 
+compile_and_run digest_cue_display \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
+    "$project_dir/Sources/Replay/DigestTranscriptSearch.swift" \
+    "$project_dir/Sources/Replay/DigestCueDisplay.swift" \
+    "$project_dir/tools/digest_cue_display_check.swift"
+
 compile_and_run digest_notes \
     "$project_dir/Sources/Replay/DigestNotes.swift" \
     "$project_dir/tools/digest_notes_check.swift"
