@@ -108,7 +108,7 @@ struct DigestSelectionBar: View {
                     .padding(.vertical, 5)
             }
             .watchGlassButton(prominent: true)
-            .disabled(isExplaining)
+            .disabled(isExplaining || !canUseModel)
             Button(action: onSaveNote) {
                 Text("存笔记")
                     .font(.system(size: 11, weight: .medium))
