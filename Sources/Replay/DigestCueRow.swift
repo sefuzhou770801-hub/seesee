@@ -1,6 +1,28 @@
 import AppKit
 import SwiftUI
 
+struct DigestNoteTextStack: View {
+    let text: String
+
+    var body: some View {
+        let lines = DigestCueDisplay.lines(from: text)
+        VStack(alignment: .leading, spacing: DigestCueDisplay.pairSpacing) {
+            Text(lines.translation)
+                .font(.system(size: DigestCueDisplay.translationSize))
+                .foregroundStyle(OpenMyChrome.ink)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if let original = lines.original {
+                Text(original)
+                    .font(.system(size: DigestCueDisplay.originalSize))
+                    .foregroundStyle(OpenMyChrome.muted)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 struct DigestCueRow: View {
     let timeLabel: String
     let cueText: String

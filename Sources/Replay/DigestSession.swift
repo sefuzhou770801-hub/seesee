@@ -84,13 +84,25 @@ final class DigestSession: ObservableObject {
     }
 
     @discardableResult
-    func saveSelectedNote() -> DigestNote? {
+    func saveSelectedNote(cues: [VideoSubtitleCue] = []) -> DigestNote? {
         guard !noteJustSaved else { return nil }
-        let text = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let itemID, let folder else { return nil }
-        let note = DigestNote(id: UUID(), time: selectedCueTime, text: text, createdAt: Date())
+        let noteCues = cues.map { DigestNoteSource(startTime: $0.startTime, text: $0.text) }
+        let selected = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty, let itemID, let folder else { return nil }
+        let captured = DigestNoteCapture.sources(
+            selected: selected,
+            hintIndex: selectedCueIndex ?? 0,
+            cues: noteCues
+        )
+        guard !captured.isEmpty else { return nil }
         var next = notes
-        next.insert(note, at: 0)
+        var last: DigestNote?
+        let createdAt = Date()
+        for source in captured.reversed() {
+            let note = DigestNote(id: UUID(), time: source.startTime, text: source.text, createdAt: createdAt)
+            next.insert(note, at: 0)
+            last = note
+        }
         do {
             try DigestNotesStore.save(next, itemID: itemID, folder: folder)
             notes = next
@@ -101,7 +113,7 @@ final class DigestSession: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self?.noteJustSaved = false
             }
-            return note
+            return last
         } catch {
             return nil
         }

@@ -2281,7 +2281,7 @@ private struct ChapterSidebar: View {
                                             onExplain: {
                                                 digest.explainSelection(title: itemTitle, cues: displayCues)
                                             },
-                                            onSaveNote: { _ = digest.saveSelectedNote() }
+                                            onSaveNote: { _ = digest.saveSelectedNote(cues: displayCues) }
                                         )
                                         .padding(.leading, timeColumnWidth + 10)
                                         if digest.explainNeedsRetry {

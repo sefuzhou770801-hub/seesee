@@ -6,6 +6,8 @@ struct DigestNotesCheck {
         checkFileNaming()
         try checkRoundTripAndDelete()
         checkCorruptAndMissing()
+        checkCaptureWholeBlock()
+        checkCaptureSpansTwoCues()
         print("digest_notes_check=passed")
     }
 
@@ -56,5 +58,27 @@ struct DigestNotesCheck {
         try? "not-json".write(to: corrupt, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: corrupt) }
         precondition(DigestNotesStore.load(from: corrupt).isEmpty, "坏 JSON 按空列表")
+    }
+
+    private static func checkCaptureWholeBlock() {
+        let cue = DigestNoteSource(
+            startTime: 68,
+            text: "This is very likely the reason.\n这很可能就是原因。"
+        )
+        let saved = DigestNoteCapture.sources(selected: "很可能", hintIndex: 0, cues: [cue])
+        precondition(saved.count == 1)
+        precondition(saved[0].text == cue.text, "选区只决定哪一句，必须存整句")
+        precondition(saved[0].startTime == 68)
+        precondition(!saved[0].text.contains("很可能") || saved[0].text.count > 3)
+    }
+
+    private static func checkCaptureSpansTwoCues() {
+        let first = DigestNoteSource(startTime: 10, text: "Hello world.\n你好世界。")
+        let second = DigestNoteSource(startTime: 14, text: "This is likely.\n这很可能。")
+        let selected = "世界。\nThis is likely."
+        let saved = DigestNoteCapture.sources(selected: selected, hintIndex: 0, cues: [first, second])
+        precondition(saved.count == 2, "跨两句必须两句都存，实际 \(saved.count)")
+        precondition(saved[0].startTime == 10)
+        precondition(saved[1].startTime == 14)
     }
 }

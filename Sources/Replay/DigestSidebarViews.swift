@@ -391,11 +391,7 @@ struct DigestNotesPage: View {
                         .font(.system(size: 11).monospacedDigit())
                         .foregroundStyle(OpenMyChrome.muted)
                         .frame(width: timeColumnWidth, alignment: .trailing)
-                    Text(SubtitleSentenceBlocks.withCJKLatinSpacing(note.text))
-                        .font(.system(size: DigestCueDisplay.translationSize))
-                        .foregroundStyle(OpenMyChrome.ink)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    DigestNoteTextStack(text: note.text)
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
