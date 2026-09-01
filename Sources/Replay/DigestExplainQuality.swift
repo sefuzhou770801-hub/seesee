@@ -9,7 +9,8 @@ enum DigestExplainQuality {
     }
 
     static let minCharacters = 6
-    static let retryPrompt = "没解释清楚，重试"
+    static let retryPrompt = "这句没答好"
+    static let retryButtonTitle = "再试一次"
 
     static func verdict(selected: String, explanation: String) -> Verdict {
         let answer = explanation.trimmingCharacters(in: .whitespacesAndNewlines)

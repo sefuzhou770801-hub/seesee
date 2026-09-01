@@ -26,7 +26,8 @@ struct DigestExplainQualityCheck {
                 explanation: "Transformer 是一种注意力架构。"
             ) == .ok
         )
-        precondition(DigestExplainQuality.retryPrompt == "没解释清楚，重试")
+        precondition(DigestExplainQuality.retryPrompt == "这句没答好")
+        precondition(DigestExplainQuality.retryButtonTitle == "再试一次")
         print("digest_explain_quality_check=passed")
     }
 }

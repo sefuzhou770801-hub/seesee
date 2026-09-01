@@ -173,7 +173,7 @@ final class DigestSession: ObservableObject {
             return
         }
         guard !cues.isEmpty else {
-            overviewMessage = "当前视频没有可用字幕"
+            overviewMessage = "这段没有字幕"
             return
         }
         guard let itemID, let folder else { return }
@@ -203,7 +203,7 @@ final class DigestSession: ObservableObject {
                 )
                 guard !Task.isCancelled else { return }
                 guard let payload = DigestOverviewCodec.parse(text) else {
-                    self?.overviewMessage = "总览结果无法解析"
+                    self?.overviewMessage = "这次没写成"
                     self?.isGeneratingOverview = false
                     return
                 }
@@ -219,7 +219,7 @@ final class DigestSession: ObservableObject {
                     chapters: payload.chapters,
                     duration: resolvedDuration
                 ) {
-                    self?.overviewMessage = "章节可能没有覆盖到片尾，可重新生成。"
+                    self?.overviewMessage = "后面几段几乎没写到，可以再写一次。"
                 } else {
                     self?.overviewMessage = nil
                 }
@@ -244,23 +244,21 @@ final class DigestSession: ObservableObject {
             return
         }
         let cueIndex = selectedCueIndex ?? 0
-        let context = DigestExplainPrompt.context(around: cueIndex, in: cues)
+        let passage = DigestExplainPrompt.passage(selected: selected, around: cueIndex, in: cues)
         isExplaining = true
         explainMessage = nil
         explanation = nil
+        explainNeedsRetry = false
         explainTask?.cancel()
         explainTask = Task { [weak self] in
             do {
                 let text = try await DigestAPIClient.complete(
                     system: DigestExplainPrompt.systemPrompt,
-                    user: DigestExplainPrompt.userText(
-                        videoTitle: title,
-                        selected: selected,
-                        context: context
-                    ),
+                    user: DigestExplainPrompt.userText(videoTitle: title, passage: passage),
                     apiKey: apiKey,
                     maxTokens: DigestExplainPrompt.maxTokens,
-                    provider: provider
+                    provider: provider,
+                    temperature: DigestExplainPrompt.temperature
                 )
                 guard !Task.isCancelled else { return }
                 self?.isExplaining = false

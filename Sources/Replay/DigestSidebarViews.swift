@@ -79,7 +79,7 @@ struct DigestSelectionBar: View {
     var body: some View {
         HStack(spacing: 6) {
             Button(action: onExplain) {
-                Text(isExplaining ? "解释中…" : "解释")
+                Text(isExplaining ? "稍等…" : "解释")
                     .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -87,7 +87,7 @@ struct DigestSelectionBar: View {
             .watchGlassButton(prominent: true)
             .disabled(isExplaining || !canUseModel)
             Button(action: onSaveNote) {
-                Text(noteSaved ? "已存" : "存笔记")
+                Text(noteSaved ? "记下了" : "存笔记")
                     .font(.system(size: 11, weight: .medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -115,7 +115,7 @@ struct DigestExplainRetryBar: View {
                 .foregroundStyle(OpenMyChrome.ink)
             Spacer(minLength: 0)
             Button(action: onRetry) {
-                Text("重试")
+                Text(DigestExplainQuality.retryButtonTitle)
                     .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -197,12 +197,12 @@ struct DigestOverviewPage: View {
                     .font(.system(size: 11))
                     .foregroundStyle(OpenMyChrome.muted)
             } else if !hasSubtitles {
-                Text("没有字幕，无法生成总览")
+                Text("这段没有字幕，写不了总览")
                     .font(.system(size: 11))
                     .foregroundStyle(OpenMyChrome.muted)
             } else {
                 Button(action: generate) {
-                    Text(isGenerating ? "正在生成…" : (overview == nil ? "生成总览" : "重新生成"))
+                    Text(isGenerating ? "在整理…" : (overview == nil ? "写总览" : "再写一次"))
                         .font(.system(size: 11, weight: .semibold))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
@@ -219,12 +219,12 @@ struct DigestOverviewPage: View {
     @ViewBuilder
     private var emptyState: some View {
         if let message, !message.isEmpty {
-            sidePaneEmptyState(title: "总览未生成", detail: message)
+            sidePaneEmptyState(title: "还没有总览", detail: message)
         } else {
             sidePaneEmptyState(
-                title: "暂无总览",
+                title: "还没有总览",
                 detail: hasAPIKey
-                    ? "把全片字幕发给模型，生成覆盖到片尾的章节和金句。"
+                    ? "看完全片字幕，整理章节和金句。"
                     : DigestRequestBuilder.missingKeyHint
             )
         }
@@ -320,11 +320,11 @@ struct DigestNoteUndoBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("已删除")
+            Text("删掉了")
                 .font(.system(size: 13))
                 .foregroundStyle(OpenMyChrome.muted)
             Spacer(minLength: 0)
-            Button("撤销", action: onUndo)
+            Button("撤回", action: onUndo)
                 .font(.system(size: 11, weight: .semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -361,7 +361,7 @@ struct DigestNotesPage: View {
         if notes.isEmpty {
             sidePaneEmptyState(
                 title: "暂无笔记",
-                detail: "在字幕页选中文字，点「存笔记」。"
+                detail: "在字幕里划一段，点存笔记。"
             )
         } else {
             ScrollView {

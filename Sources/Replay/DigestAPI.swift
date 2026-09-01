@@ -1,45 +1,77 @@
 import Foundation
 
 enum DigestExplainPrompt {
-    static let systemPrompt = """
-    你解释视频字幕里被选中的文字。务必极简。
+    static let maxTokens = 512
+    static let temperature = 0.2
 
-    规则：
-    - 最多 1 到 3 句
-    - 如果是词或术语：给简短定义
-    - 如果是短语或论断：结合上下文解释含义
-    - 不要套话，不要写「这指的是」，直接解释
-    - 必须用简体中文作答。解释正文不得写成英文句子；专名、术语原文可以夹在中文里。
+    static let systemPrompt = """
+    你在帮人看视频。对方划出了几个字，你用大白话告诉他这几个字在这句里是什么意思。
+
+    只用简体中文，说一两句就够，最多三句。
+    别把原句再说一遍，别客套，别用英文写解释。
+    专名可以留原文。
     """
 
-    static let maxTokens = 256
+    struct Passage: Equatable {
+        var selected: String
+        var original: String
+        var translation: String
+        var previous: String
+        var next: String
+    }
 
-    static func userText(videoTitle: String, selected: String, context: String) -> String {
-        let contextLine = context.trimmingCharacters(in: .whitespacesAndNewlines)
-        return """
-        VIDEO: \(videoTitle)
+    static func userText(videoTitle: String, passage: Passage) -> String {
+        """
+        视频：\(videoTitle)
 
-        SELECTED: "\(selected)"
+        选中：\(passage.selected)
 
-        CONTEXT: \(contextLine.isEmpty ? "None" : contextLine)
+        它所在的这句
+        原文：\(blank(passage.original))
+        译文：\(blank(passage.translation))
 
-        请用简体中文简要解释。
+        上一句：\(blank(passage.previous))
+        下一句：\(blank(passage.next))
+
+        这几个字在这里是什么意思？
         """
     }
 
-    static func context(around index: Int, in cues: [VideoSubtitleCue], window: Int = 2) -> String {
-        guard cues.indices.contains(index) else { return "" }
-        let start = max(0, index - window)
-        let end = min(cues.count - 1, index + window)
-        return (start...end).map { cueIndex in
-            let cue = cues[cueIndex]
-            let body = cue.text
-                .components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
-            return "[\(DigestTimecode.format(cue.startTime))] \(body)"
-        }.joined(separator: "\n")
+    static func passage(selected: String, around index: Int, in cues: [VideoSubtitleCue]) -> Passage {
+        let current = cues.indices.contains(index) ? pair(cues[index]) : ("", "")
+        let previous = index > 0 ? joined(cues[index - 1]) : ""
+        let next = index + 1 < cues.count ? joined(cues[index + 1]) : ""
+        return Passage(
+            selected: selected.trimmingCharacters(in: .whitespacesAndNewlines),
+            original: current.0,
+            translation: current.1,
+            previous: previous,
+            next: next
+        )
+    }
+
+    private static func pair(_ cue: VideoSubtitleCue) -> (String, String) {
+        let parts = cue.text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let rest = parts.dropFirst().joined(separator: " ")
+        if parts.count >= 2, rest != parts[0] {
+            return (parts[0], rest)
+        }
+        return ("", parts.first ?? cue.text)
+    }
+
+    private static func joined(_ cue: VideoSubtitleCue) -> String {
+        let parts = pair(cue)
+        if parts.0.isEmpty { return parts.1 }
+        if parts.1.isEmpty { return parts.0 }
+        return "\(parts.0) / \(parts.1)"
+    }
+
+    private static func blank(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "无" : trimmed
     }
 }
 
@@ -117,8 +149,13 @@ enum DigestGeminiRequestBuilder {
         return URL(string: "\(endpoint.absoluteString)?key=\(encoded)")!
     }
 
-    static func jsonObject(system: String, user: String, maxTokens: Int) -> [String: Any] {
-        [
+    static func jsonObject(system: String, user: String, maxTokens: Int, temperature: Double? = nil) -> [String: Any] {
+        var config: [String: Any] = ["maxOutputTokens": maxTokens]
+        if let temperature {
+            config["temperature"] = temperature
+            config["thinkingConfig"] = ["thinkingBudget": 0]
+        }
+        return [
             "systemInstruction": [
                 "parts": [
                     ["text": system]
@@ -132,14 +169,12 @@ enum DigestGeminiRequestBuilder {
                     ]
                 ]
             ],
-            "generationConfig": [
-                "maxOutputTokens": maxTokens
-            ]
+            "generationConfig": config
         ]
     }
 
-    static func jsonData(system: String, user: String, maxTokens: Int) -> Data? {
-        try? JSONSerialization.data(withJSONObject: jsonObject(system: system, user: user, maxTokens: maxTokens))
+    static func jsonData(system: String, user: String, maxTokens: Int, temperature: Double? = nil) -> Data? {
+        try? JSONSerialization.data(withJSONObject: jsonObject(system: system, user: user, maxTokens: maxTokens, temperature: temperature))
     }
 
     static func text(fromResponse data: Data) -> String? {
@@ -149,20 +184,23 @@ enum DigestGeminiRequestBuilder {
               let content = first["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]]
         else { return nil }
-        let joined = parts.compactMap { $0["text"] as? String }.joined()
+        let joined = parts.compactMap { item -> String? in
+            if item["thought"] as? Bool == true { return nil }
+            return item["text"] as? String
+        }.joined()
         return joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : joined
     }
 }
 
 enum DigestRequestBuilder {
-    static let missingKeyHint = "未配置密钥"
+    static let missingKeyHint = "还没填密钥"
     static var model: String { WatchQARequestBuilder.model }
     static var endpoint: URL { WatchQARequestBuilder.endpoint }
     static var anthropicVersion: String { WatchQARequestBuilder.anthropicVersion }
     static let overviewMaxTokens = 8192
 
-    static func jsonObject(system: String, user: String, maxTokens: Int) -> [String: Any] {
-        [
+    static func jsonObject(system: String, user: String, maxTokens: Int, temperature: Double? = nil) -> [String: Any] {
+        var object: [String: Any] = [
             "model": model,
             "max_tokens": maxTokens,
             "stream": false,
@@ -174,10 +212,14 @@ enum DigestRequestBuilder {
                 ]
             ]
         ]
+        if let temperature {
+            object["temperature"] = temperature
+        }
+        return object
     }
 
-    static func jsonData(system: String, user: String, maxTokens: Int) -> Data? {
-        try? JSONSerialization.data(withJSONObject: jsonObject(system: system, user: user, maxTokens: maxTokens))
+    static func jsonData(system: String, user: String, maxTokens: Int, temperature: Double? = nil) -> Data? {
+        try? JSONSerialization.data(withJSONObject: jsonObject(system: system, user: user, maxTokens: maxTokens, temperature: temperature))
     }
 
     static func text(fromResponse data: Data) -> String? {
@@ -217,6 +259,7 @@ enum DigestAPIClient {
         apiKey: String,
         maxTokens: Int,
         provider: DigestProviderKind = DigestProvider.resolve(),
+        temperature: Double? = nil,
         session: URLSession = .shared
     ) async throws -> String {
         switch provider {
@@ -226,6 +269,7 @@ enum DigestAPIClient {
                 user: user,
                 apiKey: apiKey,
                 maxTokens: maxTokens,
+                temperature: temperature,
                 session: session
             )
         case .gemini:
@@ -234,6 +278,7 @@ enum DigestAPIClient {
                 user: user,
                 apiKey: apiKey,
                 maxTokens: maxTokens,
+                temperature: temperature,
                 session: session
             )
         }
@@ -244,6 +289,7 @@ enum DigestAPIClient {
         user: String,
         apiKey: String,
         maxTokens: Int,
+        temperature: Double?,
         session: URLSession
     ) async throws -> String {
         var request = URLRequest(url: DigestRequestBuilder.endpoint)
@@ -251,8 +297,13 @@ enum DigestAPIClient {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(DigestRequestBuilder.anthropicVersion, forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        guard let httpBody = DigestRequestBuilder.jsonData(system: system, user: user, maxTokens: maxTokens) else {
-            throw DigestClientError(message: "请求无法编码")
+        guard let httpBody = DigestRequestBuilder.jsonData(
+            system: system,
+            user: user,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ) else {
+            throw DigestClientError(message: "这次没写成")
         }
         request.httpBody = httpBody
         return try await send(request, session: session, extract: DigestRequestBuilder.text(fromResponse:))
@@ -263,13 +314,19 @@ enum DigestAPIClient {
         user: String,
         apiKey: String,
         maxTokens: Int,
+        temperature: Double?,
         session: URLSession
     ) async throws -> String {
         var request = URLRequest(url: DigestGeminiRequestBuilder.requestURL(apiKey: apiKey))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        guard let httpBody = DigestGeminiRequestBuilder.jsonData(system: system, user: user, maxTokens: maxTokens) else {
-            throw DigestClientError(message: "请求无法编码")
+        guard let httpBody = DigestGeminiRequestBuilder.jsonData(
+            system: system,
+            user: user,
+            maxTokens: maxTokens,
+            temperature: temperature
+        ) else {
+            throw DigestClientError(message: "这次没写成")
         }
         request.httpBody = httpBody
         return try await send(request, session: session, extract: DigestGeminiRequestBuilder.text(fromResponse:))
@@ -287,7 +344,7 @@ enum DigestAPIClient {
         guard let text = extract(data),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
-            throw DigestClientError(message: "没有得到有效回答")
+            throw DigestClientError(message: "这次没写成")
         }
         return text
     }

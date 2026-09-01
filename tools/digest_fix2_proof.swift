@@ -76,11 +76,11 @@ private struct UndoProofView: View {
         ZStack {
             OpenMyChrome.canvas
             HStack(spacing: 8) {
-                Text("已删除")
+                Text("删掉了")
                     .font(.system(size: 13))
                     .foregroundStyle(OpenMyChrome.muted)
                 Spacer(minLength: 0)
-                Text("撤销")
+                Text("撤回")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(OpenMyChrome.ink)
                     .padding(.horizontal, 10)
@@ -117,7 +117,7 @@ private struct SavedProofView: View {
                     .padding(.vertical, 5)
                     .background(OpenMyChrome.canvas, in: Capsule())
                     .overlay { Capsule().strokeBorder(OpenMyChrome.hair) }
-                Text("已存")
+                Text("记下了")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(OpenMyChrome.ink)
                     .padding(.horizontal, 10)

@@ -15,34 +15,32 @@ struct DigestAPICheck {
     }
 
     private static func checkExplainPrompt() {
-        precondition(DigestExplainPrompt.systemPrompt.contains("1 到 3 句") || DigestExplainPrompt.systemPrompt.contains("1到3句"))
-        precondition(DigestExplainPrompt.systemPrompt.contains("最多"))
         precondition(DigestExplainPrompt.systemPrompt.contains("简体中文"))
-        precondition(DigestExplainPrompt.systemPrompt.contains("不得写成英文句子"))
-        let user = DigestExplainPrompt.userText(
-            videoTitle: "Demo",
-            selected: "transformer",
-            context: "[1:00] we use a transformer"
-        )
-        precondition(user.contains("SELECTED: \"transformer\""))
-        precondition(user.contains("VIDEO: Demo"))
-        precondition(user.contains("[1:00] we use a transformer"))
-
-        let emptyContext = DigestExplainPrompt.userText(videoTitle: "Demo", selected: "x", context: "  ")
-        precondition(emptyContext.contains("CONTEXT: None"))
-        precondition(user.contains("简体中文"))
+        precondition(DigestExplainPrompt.systemPrompt.contains("一两句") || DigestExplainPrompt.systemPrompt.contains("一到三句"))
+        precondition(DigestExplainPrompt.systemPrompt.contains("别把原句再说一遍"))
+        precondition(DigestExplainPrompt.temperature == 0.2)
 
         let cues = [
             VideoSubtitleCue(startTime: 0, endTime: 2, text: "one"),
-            VideoSubtitleCue(startTime: 10, endTime: 12, text: "two\n二"),
-            VideoSubtitleCue(startTime: 20, endTime: 22, text: "three"),
+            VideoSubtitleCue(startTime: 10, endTime: 12, text: "Agents can plan.\n智能体可以做计划。"),
+            VideoSubtitleCue(startTime: 20, endTime: 22, text: "three\n三"),
             VideoSubtitleCue(startTime: 30, endTime: 32, text: "four")
         ]
-        let around = DigestExplainPrompt.context(around: 1, in: cues, window: 1)
-        precondition(around.contains("[0:00] one"))
-        precondition(around.contains("[0:10] two 二"))
-        precondition(around.contains("[0:20] three"))
-        precondition(!around.contains("[0:30] four"))
+        let passage = DigestExplainPrompt.passage(selected: "plan", around: 1, in: cues)
+        precondition(passage.selected == "plan")
+        precondition(passage.original == "Agents can plan.")
+        precondition(passage.translation == "智能体可以做计划。")
+        precondition(passage.previous == "one")
+        precondition(passage.next.contains("three"))
+        precondition(!passage.next.contains("four"))
+
+        let user = DigestExplainPrompt.userText(videoTitle: "Demo", passage: passage)
+        precondition(user.contains("选中：plan"))
+        precondition(user.contains("原文：Agents can plan."))
+        precondition(user.contains("译文：智能体可以做计划。"))
+        precondition(user.contains("上一句：one"))
+        precondition(user.contains("下一句："))
+        precondition(user.contains("这几个字在这里是什么意思"))
     }
 
     private static func checkRequestJSON() {
@@ -76,7 +74,7 @@ struct DigestAPICheck {
     }
 
     private static func checkMissingKeyHint() {
-        precondition(DigestRequestBuilder.missingKeyHint == "未配置密钥")
+        precondition(DigestRequestBuilder.missingKeyHint == "还没填密钥")
         let empty = UserDefaults(suiteName: "digest-api-empty-\(UUID().uuidString)")!
         precondition(WatchQAAPIKey.resolve(defaults: empty, environment: [:]) == nil)
         precondition(DigestGeminiAPIKey.resolve(defaults: empty, environment: [:]) == nil)
@@ -164,6 +162,15 @@ struct DigestAPICheck {
         precondition(config?["maxOutputTokens"] as? Int == 256)
         precondition(object["model"] == nil, "Gemini 模型在 URL 路径里，不进 JSON 体")
 
+        let withTemp = DigestGeminiRequestBuilder.jsonObject(
+            system: "sys",
+            user: "hello",
+            maxTokens: 256,
+            temperature: 0.2
+        )
+        let tempConfig = withTemp["generationConfig"] as? [String: Any]
+        let temp = (tempConfig?["temperature"] as? NSNumber)?.doubleValue
+        precondition(temp == 0.2, "解释请求须带低温度，实际 \(String(describing: temp))")
         precondition(DigestGeminiRequestBuilder.model == "gemini-3.7-flash")
         let url = DigestGeminiRequestBuilder.requestURL(apiKey: "abc/def")
         precondition(url.absoluteString.contains("generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent"))
@@ -176,6 +183,8 @@ struct DigestAPICheck {
     private static func checkGeminiResponseParse() {
         let data = Data(#"{"candidates":[{"content":{"parts":[{"text":"第一句。"},{"text":"第二句。"}]}}]}"#.utf8)
         precondition(DigestGeminiRequestBuilder.text(fromResponse: data) == "第一句。第二句。")
+        let withThought = Data(#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"rules check"},{"text":"这是正文。"}]}}]}"#.utf8)
+        precondition(DigestGeminiRequestBuilder.text(fromResponse: withThought) == "这是正文。", "思考片段不得进解释")
 
         let empty = Data(#"{"candidates":[]}"#.utf8)
         precondition(DigestGeminiRequestBuilder.text(fromResponse: empty) == nil)
