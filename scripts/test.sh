@@ -83,6 +83,29 @@ compile_and_run side_pane_selection \
     "$project_dir/Sources/Replay/SidePaneSelection.swift" \
     "$project_dir/tools/side_pane_selection_check.swift"
 
+compile_and_run digest_search \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/DigestTranscriptSearch.swift" \
+    "$project_dir/tools/digest_search_check.swift"
+
+compile_and_run digest_notes \
+    "$project_dir/Sources/Replay/DigestNotes.swift" \
+    "$project_dir/tools/digest_notes_check.swift"
+
+compile_and_run digest_overview \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/DigestOverview.swift" \
+    "$project_dir/tools/digest_overview_check.swift"
+
+compile_and_run digest_api \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/WatchQAContext.swift" \
+    "$project_dir/Sources/Replay/DigestOverview.swift" \
+    "$project_dir/Sources/Replay/DigestAPI.swift" \
+    "$project_dir/tools/digest_api_check.swift"
+
 compile_and_run player_ready \
     "$project_dir/Sources/Replay/WatchItem.swift" \
     "$project_dir/Sources/Replay/PlayerReadyDecision.swift" \
