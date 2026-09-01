@@ -20,7 +20,7 @@ final class DigestSession: ObservableObject {
     private var overviewTask: Task<Void, Never>?
 
     var hasAPIKey: Bool {
-        WatchQAAPIKey.resolve() != nil
+        DigestAPIKey.resolve() != nil
     }
 
     func load(itemID: UUID, folder: URL) {
@@ -98,7 +98,8 @@ final class DigestSession: ObservableObject {
         cues: [VideoSubtitleCue]
     ) {
         guard !isGeneratingOverview else { return }
-        guard let apiKey = WatchQAAPIKey.resolve() else {
+        let provider = DigestProvider.resolve()
+        guard let apiKey = DigestAPIKey.resolve(provider: provider) else {
             overviewMessage = DigestRequestBuilder.missingKeyHint
             return
         }
@@ -127,7 +128,8 @@ final class DigestSession: ObservableObject {
                     system: system,
                     user: user,
                     apiKey: apiKey,
-                    maxTokens: DigestRequestBuilder.overviewMaxTokens
+                    maxTokens: DigestRequestBuilder.overviewMaxTokens,
+                    provider: provider
                 )
                 guard !Task.isCancelled else { return }
                 guard let payload = DigestOverviewCodec.parse(text) else {
@@ -138,7 +140,7 @@ final class DigestSession: ObservableObject {
                 let record = DigestOverviewRecord(
                     payload: payload,
                     generatedAt: Date(),
-                    model: DigestRequestBuilder.model
+                    model: provider.activeModel
                 )
                 try DigestOverviewStore.save(record, itemID: itemID, folder: folder)
                 self?.overview = payload
@@ -165,7 +167,8 @@ final class DigestSession: ObservableObject {
     ) {
         let selected = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selected.isEmpty else { return }
-        guard let apiKey = WatchQAAPIKey.resolve() else {
+        let provider = DigestProvider.resolve()
+        guard let apiKey = DigestAPIKey.resolve(provider: provider) else {
             explanation = nil
             explainMessage = DigestRequestBuilder.missingKeyHint
             return
@@ -186,7 +189,8 @@ final class DigestSession: ObservableObject {
                         context: context
                     ),
                     apiKey: apiKey,
-                    maxTokens: DigestExplainPrompt.maxTokens
+                    maxTokens: DigestExplainPrompt.maxTokens,
+                    provider: provider
                 )
                 guard !Task.isCancelled else { return }
                 self?.explanation = text.trimmingCharacters(in: .whitespacesAndNewlines)

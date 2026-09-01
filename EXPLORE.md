@@ -32,6 +32,10 @@
 6. **总览**：切到总览。无密钥时看到占位句。有密钥时点「生成总览」，等一会儿出现章节和金句。点条目应跳播放。关掉视频再打开，总览应直接在，不必再生成。
 7. 密钥写法（本机已有 WatchQA 密钥则可跳过）：
    `defaults write com.mg.replay AnthropicAPIKey -string sk-…`
+8. 总览和解释可改走本地 Gemini（WatchQA 仍走 Anthropic）：
+   `defaults write com.mg.replay DigestProvider -string gemini`
+   `defaults write com.mg.replay GeminiAPIKey -string …`
+   或导出 `GEMINI_API_KEY`。改回：`defaults write com.mg.replay DigestProvider -string anthropic`。
 
 Studio 上不要为了试玩启动应用。真机试玩交给老板或 Air。
 
