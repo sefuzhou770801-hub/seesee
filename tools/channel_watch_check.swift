@@ -7,6 +7,7 @@ struct ChannelWatchCheck {
         checkCanonicalSubscriptionURL()
         checkListingParse()
         checkSelectNewEntries()
+        checkBaselinePolicy()
         checkSubscriptionFile()
         print("channel_watch_check=passed")
     }
@@ -126,6 +127,55 @@ struct ChannelWatchCheck {
         precondition(allKnown.isEmpty)
     }
 
+    /// 首次订阅只记清单不入队；之后只入队基线之外的新视频，每次最多 3 条，没轮到的留到下次。
+    private static func checkBaselinePolicy() {
+        let source = URL(string: "https://www.youtube.com/@veritasium")!
+        let first = PlaylistListing.parse("""
+        aaa11111111|One
+        bbb22222222|Two
+        ccc33333333|Three
+        """, sourceURL: source)
+        let baseline = ChannelWatchPolicy.plan(listing: first, known: [], existingURLStrings: [])
+        precondition(baseline.toEnqueue.isEmpty, "首次订阅不得入队旧片")
+        precondition(baseline.knownURLStrings == first.map { URLIntake.canonicalString(for: $0.url) })
+
+        let again = ChannelWatchPolicy.plan(listing: first, known: baseline.knownURLStrings, existingURLStrings: [])
+        precondition(again.toEnqueue.isEmpty, "清单没变就没有新片")
+        precondition(again.knownURLStrings == baseline.knownURLStrings)
+
+        let later = PlaylistListing.parse("""
+        eee55555555|Five
+        ddd44444444|Four
+        aaa11111111|One
+        bbb22222222|Two
+        """, sourceURL: source)
+        let update = ChannelWatchPolicy.plan(listing: later, known: baseline.knownURLStrings, existingURLStrings: [])
+        precondition(update.toEnqueue.map(\.id) == ["eee55555555", "ddd44444444"], "只入队基线之外的新片，按清单顺序")
+        precondition(Set(update.knownURLStrings).count == 5, "入队的记入基线")
+
+        let inQueue = ChannelWatchPolicy.plan(
+            listing: later,
+            known: baseline.knownURLStrings,
+            existingURLStrings: ["https://www.youtube.com/watch?v=eee55555555"]
+        )
+        precondition(inQueue.toEnqueue.map(\.id) == ["ddd44444444"], "已在待播清单里的不重复入队")
+        precondition(inQueue.knownURLStrings.contains("https://www.youtube.com/watch?v=eee55555555"), "已在清单里的记入基线")
+
+        let burst = PlaylistListing.parse("""
+        n1111111111|N1
+        n2222222222|N2
+        n3333333333|N3
+        n4444444444|N4
+        n5555555555|N5
+        aaa11111111|One
+        """, sourceURL: source)
+        let capped = ChannelWatchPolicy.plan(listing: burst, known: baseline.knownURLStrings, existingURLStrings: [], maximumAdditions: 3)
+        precondition(capped.toEnqueue.map(\.id) == ["n1111111111", "n2222222222", "n3333333333"], "每次最多 3 条")
+        precondition(!capped.knownURLStrings.contains("https://www.youtube.com/watch?v=n4444444444"), "没轮到的不记基线，下次再来")
+        let next = ChannelWatchPolicy.plan(listing: burst, known: capped.knownURLStrings, existingURLStrings: [], maximumAdditions: 3)
+        precondition(next.toEnqueue.map(\.id) == ["n4444444444", "n5555555555"], "下次补上剩余新片")
+    }
+
     private static func checkSubscriptionFile() {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("channel-watch-\(UUID().uuidString)", isDirectory: true)
@@ -152,5 +202,18 @@ struct ChannelWatchCheck {
         precondition(loaded[0].title == original[0].title)
         precondition(loaded[0].addedAt.timeIntervalSince1970 == 1_700_000_000)
         precondition(loaded[0].lastCheckedAt?.timeIntervalSince1970 == 1_700_000_400)
+        precondition(loaded[0].knownURLStrings.isEmpty)
+
+        var withBaseline = original
+        withBaseline[0].knownURLStrings = ["https://www.youtube.com/watch?v=aaa11111111"]
+        ChannelSubscriptionFile.save(withBaseline, to: file)
+        precondition(ChannelSubscriptionFile.load(from: file)[0].knownURLStrings == ["https://www.youtube.com/watch?v=aaa11111111"], "基线随文件保存")
+
+        let legacy = """
+        [{"id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","urlString":"https://www.youtube.com/@veritasium","title":"@veritasium","addedAt":"2023-11-14T22:13:20Z"}]
+        """
+        try! legacy.data(using: .utf8)!.write(to: file)
+        let migrated = ChannelSubscriptionFile.load(from: file)
+        precondition(migrated.count == 1 && migrated[0].knownURLStrings.isEmpty, "旧文件没有基线字段也能读")
     }
 }

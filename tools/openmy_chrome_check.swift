@@ -17,6 +17,7 @@ struct OpenMyChromeCheck {
         precondition(OpenMyChrome.radiusMd == 10)
         precondition(OpenMyChrome.radiusLg == 12)
         precondition(OpenMyChrome.radiusXl == 16)
+        precondition(OpenMyChrome.paneHeaderHeight == 56, "各栏顶栏必须是 56 点，分隔线才对齐")
 
         precondition(OpenMyChrome.rowSurfaceHex(selected: false, pressed: false, hovering: false) == nil)
         precondition(OpenMyChrome.rowSurfaceHex(selected: false, pressed: false, hovering: true) == OpenMyChrome.rowHoverHex)

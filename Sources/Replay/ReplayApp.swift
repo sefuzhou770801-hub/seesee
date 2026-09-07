@@ -50,10 +50,24 @@ struct ReplayApp: App {
         .defaultSize(width: 1320, height: 820)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(after: .sidebar) {
+                Button("显示或隐藏左侧栏") {
+                    NotificationCenter.default.post(name: .replaySidebarToggle, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+            }
             CommandGroup(after: .appInfo) {
                 Button("打开下载文件夹") { store.revealMediaFolder() }
                 Button("检查订阅更新") { store.channelWatch.pollAll() }
             }
         }
+
+        // 应用菜单「设置…」（⌘,）：AI 密钥在这里填，侧栏无密钥提示也从这里打开。
+        Settings {
+            DigestSettingsView(mediaFolder: store.mediaFolder)
+                .preferredColorScheme(.dark)
+                .tint(OpenMyChrome.ink)
+        }
+        .windowResizability(.contentSize)
     }
 }

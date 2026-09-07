@@ -122,22 +122,23 @@ final class ChannelWatchStore: ObservableObject {
             if continueQueue { pollNext() }
         }
         guard case .success(let listing) = result else { return }
-        let newcomers = PlaylistListing.newEntries(
-            from: listing,
+        guard let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        let plan = ChannelWatchPolicy.plan(
+            listing: listing,
+            known: subscriptions[index].knownURLStrings,
             existingURLStrings: existingURLStrings()
         )
-        for entry in newcomers {
+        for entry in plan.toEnqueue {
             enqueue(entry.url)
         }
         if continueQueue {
-            pendingAdded += newcomers.count
-        } else if !newcomers.isEmpty {
-            onPollFinished(newcomers.count)
+            pendingAdded += plan.toEnqueue.count
+        } else if !plan.toEnqueue.isEmpty {
+            onPollFinished(plan.toEnqueue.count)
         }
-        if let index = subscriptions.firstIndex(where: { $0.id == id }) {
-            subscriptions[index].lastCheckedAt = Date()
-            save()
-        }
+        subscriptions[index].knownURLStrings = plan.knownURLStrings
+        subscriptions[index].lastCheckedAt = Date()
+        save()
     }
 
     private func finishPolling() {

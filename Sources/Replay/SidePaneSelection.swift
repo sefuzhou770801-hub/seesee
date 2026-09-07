@@ -1,40 +1,37 @@
 import Foundation
 
 enum SidePaneMode: String {
-    case chapters
     case lyrics
+
+    /// 旧版页签键一律落到单页字幕书。
+    static func fromPersisted(_ raw: String) -> SidePaneMode {
+        _ = raw
+        return .lyrics
+    }
 }
 
 enum SidePaneSelection {
-    static func openingMode(hasChapters: Bool) -> SidePaneMode {
-        hasChapters ? .chapters : .lyrics
+    static func openingMode(hasChapters _: Bool) -> SidePaneMode {
+        .lyrics
     }
 
     static func resolvedMode(
-        preferred: SidePaneMode,
+        preferred _: SidePaneMode,
         hasChapters _: Bool,
         hasSubtitles _: Bool
     ) -> SidePaneMode {
-        preferred
+        .lyrics
     }
 
     static func recomputedMode(
-        current: SidePaneMode,
-        hasChapters: Bool,
-        userHasManuallySwitched: Bool
+        current _: SidePaneMode,
+        hasChapters _: Bool,
+        userHasManuallySwitched _: Bool
     ) -> SidePaneMode {
-        if userHasManuallySwitched {
-            return current
-        }
-        return openingMode(hasChapters: hasChapters)
+        .lyrics
     }
 
-    static func visibleTitle(for mode: SidePaneMode) -> String {
-        switch mode {
-        case .chapters:
-            return "章节"
-        case .lyrics:
-            return "字幕"
-        }
+    static func visibleTitle(for _: SidePaneMode) -> String {
+        "字幕"
     }
 }

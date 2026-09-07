@@ -56,3 +56,44 @@ enum PlaylistListing {
         )
     }
 }
+
+/// 订阅入队策略：首次只记清单不入队；之后只把基线之外新出现的视频入队，每次最多几条，没轮到的留到下次。
+enum ChannelWatchPolicy {
+    struct Plan: Equatable {
+        var toEnqueue: [PlaylistListing.Entry]
+        var knownURLStrings: [String]
+    }
+
+    static func plan(
+        listing: [PlaylistListing.Entry],
+        known: [String],
+        existingURLStrings: Set<String>,
+        maximumAdditions: Int = PlaylistListing.maximumNewPerPoll
+    ) -> Plan {
+        let canonicals = listing.map { URLIntake.canonicalString(for: $0.url) }
+        if known.isEmpty {
+            return Plan(toEnqueue: [], knownURLStrings: unique(canonicals))
+        }
+        var knownSet = Set(known)
+        var nextKnown = known
+        var toEnqueue: [PlaylistListing.Entry] = []
+        for (entry, canonical) in zip(listing, canonicals) {
+            if knownSet.contains(canonical) { continue }
+            if existingURLStrings.contains(canonical) {
+                knownSet.insert(canonical)
+                nextKnown.append(canonical)
+                continue
+            }
+            guard toEnqueue.count < maximumAdditions else { continue }
+            toEnqueue.append(entry)
+            knownSet.insert(canonical)
+            nextKnown.append(canonical)
+        }
+        return Plan(toEnqueue: toEnqueue, knownURLStrings: nextKnown)
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}

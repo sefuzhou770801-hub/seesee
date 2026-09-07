@@ -38,7 +38,7 @@ enum QueueRowMeta {
     static func displayTitle(title: String, author: String) -> String {
         let trimmedAuthor = author.trimmingCharacters(in: .whitespaces)
         guard !trimmedAuthor.isEmpty else { return title }
-        for separator in [" - ", " – ", " — "] {
+        for separator in [" - ", " – ", " \u{2014} "] {
             let prefix = trimmedAuthor + separator
             if title.hasPrefix(prefix) {
                 let rest = String(title.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)

@@ -14,7 +14,7 @@ private final class PlayerSubtitleOverlayView: NSView {
     /// 滚动期间挂在裁剪层上的上下渐隐，滚完即摘。
     private(set) var presentation: VideoSubtitlePresentation?
     private var animationGeneration = 0
-    private var surfaceWidth: CGFloat = 800
+    private var surfaceWidth: CGFloat = 1
     private var bottomConstraint: NSLayoutConstraint?
     private var widthConstraint: NSLayoutConstraint?
 
@@ -63,6 +63,7 @@ private final class PlayerSubtitleOverlayView: NSView {
             ),
             widthAnchor.constraint(lessThanOrEqualToConstant: SubtitleOverlayLayout.maxOverlayWidth)
         ])
+        updateForSurfaceWidth(max(view.bounds.width, 1))
     }
 
     func setControlsVisible(_ visible: Bool) {
@@ -190,7 +191,6 @@ private final class PlayerSubtitleOverlayView: NSView {
             textStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 4),
             textStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -4)
         ])
-        updateForSurfaceWidth(800)
     }
 
     private static let rollDuration: TimeInterval = 0.25
@@ -268,9 +268,20 @@ private final class PlayerSubtitleOverlayView: NSView {
         translationPill.isHidden = translationTextField.isHidden
     }
 
+    private func resolvedSurfaceWidth() -> CGFloat {
+        if let hostWidth = superview?.bounds.width, hostWidth > 1 {
+            return hostWidth
+        }
+        if bounds.width > 1 {
+            return bounds.width
+        }
+        return max(surfaceWidth, 1)
+    }
+
     private func applyLayoutDecision() {
         let texts = displayedLines
         guard !texts.isEmpty else { return }
+        surfaceWidth = resolvedSurfaceWidth()
         let decision = SubtitleOverlayLayout.resolve(lines: texts, surfaceWidth: surfaceWidth)
         widthConstraint?.constant = decision.overlayWidth
         let fields = [sourceTextField, translationTextField].filter {
@@ -328,7 +339,13 @@ final class FloatingVideoPlayerView: AVPlayerView {
     }
 
     func setSubtitlePresentation(_ presentation: VideoSubtitlePresentation?, animated: Bool) {
+        subtitleOverlay.updateForSurfaceWidth(bounds.width)
         subtitleOverlay.setPresentation(presentation, animated: animated)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        subtitleOverlay.updateForSurfaceWidth(newSize.width)
     }
 
     override func updateTrackingAreas() {
@@ -444,12 +461,14 @@ final class PictureInPicturePlayerView: NSView {
     }
 
     func setSubtitlePresentation(_ presentation: VideoSubtitlePresentation?, animated: Bool) {
+        subtitleOverlay.updateForSurfaceWidth(bounds.width)
         subtitleOverlay.setPresentation(presentation, animated: animated)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         updatePlayerLayerFrame()
+        subtitleOverlay.updateForSurfaceWidth(newSize.width)
     }
 
     override func setBoundsSize(_ newSize: NSSize) {
@@ -927,6 +946,8 @@ final class PlaybackCommandCenter {
     private var rateSelectionHandler: ((Double) -> Void)?
     private var fullscreenHandler: (() -> Bool)?
     private var fullscreenExitHandler: (() -> Bool)?
+    private var askQuestionHandler: (() -> Bool)?
+    private var dismissAskHandler: (() -> Bool)?
 
     var hasActivePlayer: Bool { activeToken != nil }
     var activeRoutePlayer: AVPlayer? { routePlayer }
@@ -947,7 +968,8 @@ final class PlaybackCommandCenter {
         adjustRate: @escaping (Double) -> Void,
         setRate: @escaping (Double) -> Void,
         toggleFullscreen: @escaping () -> Bool,
-        exitFullscreen: @escaping () -> Bool
+        exitFullscreen: @escaping () -> Bool,
+        askQuestion: @escaping () -> Bool
     ) -> UUID {
         let token = UUID()
         activeToken = token
@@ -960,6 +982,7 @@ final class PlaybackCommandCenter {
         rateSelectionHandler = setRate
         fullscreenHandler = toggleFullscreen
         fullscreenExitHandler = exitFullscreen
+        askQuestionHandler = askQuestion
         return token
     }
 
@@ -975,6 +998,11 @@ final class PlaybackCommandCenter {
         rateSelectionHandler = nil
         fullscreenHandler = nil
         fullscreenExitHandler = nil
+        askQuestionHandler = nil
+    }
+
+    func setAskOverlayDismissHandler(_ handler: (() -> Bool)?) {
+        dismissAskHandler = handler
     }
 
     @discardableResult
@@ -1035,6 +1063,16 @@ final class PlaybackCommandCenter {
     func exitFullscreen() -> Bool {
         fullscreenExitHandler?() ?? false
     }
+
+    @discardableResult
+    func askQuestion() -> Bool {
+        askQuestionHandler?() ?? false
+    }
+
+    @discardableResult
+    func dismissAskOverlay() -> Bool {
+        dismissAskHandler?() ?? false
+    }
 }
 
 struct AirPlayRoutePicker: NSViewRepresentable {
@@ -1064,17 +1102,23 @@ struct LocalVideoPlayer: NSViewRepresentable {
     let seekRequest: PlayerSeekRequest?
     let subtitleTrack: VideoSubtitleTrack?
     let subtitleMode: SubtitleDisplayMode
+    let sourceURLString: String
+    let skipSponsorsEnabled: Bool
     let onProgress: (Double) -> Void
     let onStateChange: (PlaybackSnapshot) -> Void
     let onVolumeChange: (Double) -> Void
+    let onSponsorSkip: (Double) -> Void
     let onEnded: () -> Void
+    let onAskQuestion: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onProgress: onProgress,
             onStateChange: onStateChange,
             onVolumeChange: onVolumeChange,
-            onEnded: onEnded
+            onSponsorSkip: onSponsorSkip,
+            onEnded: onEnded,
+            onAskQuestion: onAskQuestion
         )
     }
 
@@ -1091,6 +1135,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
         view.addGestureRecognizer(click)
         context.coordinator.load(url: url, title: title, author: author, resumeAt: resumeAt, into: view)
         context.coordinator.updateSubtitles(track: subtitleTrack, mode: subtitleMode)
+        context.coordinator.updateSponsorSkip(sourceURLString: sourceURLString, enabled: skipSponsorsEnabled)
         return view
     }
 
@@ -1106,13 +1151,16 @@ struct LocalVideoPlayer: NSViewRepresentable {
     }
 
     func updateNSView(_ view: PictureInPicturePlayerView, context: Context) {
+        context.coordinator.onAskQuestion = onAskQuestion
         if context.coordinator.currentURL != url {
             context.coordinator.load(url: url, title: title, author: author, resumeAt: resumeAt, into: view)
             context.coordinator.updateSubtitles(track: subtitleTrack, mode: subtitleMode)
+            context.coordinator.updateSponsorSkip(sourceURLString: sourceURLString, enabled: skipSponsorsEnabled)
             return
         }
         context.coordinator.updateMetadata(title: title, author: author)
         context.coordinator.updateSubtitles(track: subtitleTrack, mode: subtitleMode)
+        context.coordinator.updateSponsorSkip(sourceURLString: sourceURLString, enabled: skipSponsorsEnabled)
         if let seekRequest {
             context.coordinator.seek(to: seekRequest)
         }
@@ -1145,8 +1193,18 @@ struct LocalVideoPlayer: NSViewRepresentable {
         private let onProgress: (Double) -> Void
         private let onStateChange: (PlaybackSnapshot) -> Void
         private let onVolumeChange: (Double) -> Void
+        private let onSponsorSkip: (Double) -> Void
         private let onEnded: () -> Void
+        fileprivate var onAskQuestion: () -> Void
+        private var pendingAskAfterFullscreen = false
+        private var askAfterFullscreenObserver: NSObjectProtocol?
         private var lastSeekRequestID: UUID?
+        private var sourceURLString = ""
+        private var skipEnabled = true
+        private var skipSession = SponsorSkipSession()
+        private var skipFetchTask: URLSessionDataTask?
+        private var skipFetchVideoID: String?
+        private var resumeSeekPending = false
         private var seekSession = SubtitleSeekSession()
         private var commandToken: UUID?
         private var preferredRate: Double = 1
@@ -1160,12 +1218,16 @@ struct LocalVideoPlayer: NSViewRepresentable {
             onProgress: @escaping (Double) -> Void,
             onStateChange: @escaping (PlaybackSnapshot) -> Void,
             onVolumeChange: @escaping (Double) -> Void,
-            onEnded: @escaping () -> Void
+            onSponsorSkip: @escaping (Double) -> Void,
+            onEnded: @escaping () -> Void,
+            onAskQuestion: @escaping () -> Void
         ) {
             self.onProgress = onProgress
             self.onStateChange = onStateChange
             self.onVolumeChange = onVolumeChange
+            self.onSponsorSkip = onSponsorSkip
             self.onEnded = onEnded
+            self.onAskQuestion = onAskQuestion
             super.init()
         }
 
@@ -1207,7 +1269,8 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 adjustRate: { [weak self] amount in self?.adjustPlaybackRate(by: amount) },
                 setRate: { [weak self] rate in self?.setPlaybackRate(rate) },
                 toggleFullscreen: { [weak self] in self?.toggleFullscreen() ?? false },
-                exitFullscreen: { [weak self] in self?.exitFullscreen() ?? false }
+                exitFullscreen: { [weak self] in self?.exitFullscreen() ?? false },
+                askQuestion: { [weak self] in self?.handleAskQuestion() ?? false }
             )
             SystemMediaController.shared.activate(player: player)
             SystemMediaController.shared.setItem(title: title, author: author)
@@ -1234,6 +1297,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 guard let self else { return }
                 self.publishSnapshot()
                 self.publishSubtitle(at: self.subtitleClockTime(playerTime: time.seconds), animated: true)
+                self.considerSponsorSkip(at: time.seconds)
             }
             endObserver = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
@@ -1245,9 +1309,13 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 self?.onEnded()
             }
             if resumeAt > 0 {
+                resumeSeekPending = true
                 let time = CMTime(seconds: resumeAt, preferredTimescale: 600)
                 player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-                    self?.publishSnapshot()
+                    guard let self else { return }
+                    self.resumeSeekPending = false
+                    self.publishSnapshot()
+                    self.considerSponsorSkip(at: resumeAt)
                 }
             } else {
                 publishSnapshot()
@@ -1315,7 +1383,54 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 if shouldPlay { self.startPlayback(player) }
                 self.publishSnapshot()
                 self.publishSubtitle(at: seekTime, animated: false)
+                self.considerSponsorSkip(at: seekTime)
             }
+        }
+
+        func updateSponsorSkip(sourceURLString: String, enabled: Bool) {
+            let sourceChanged = self.sourceURLString != sourceURLString
+            let enabledChanged = skipEnabled != enabled
+            self.sourceURLString = sourceURLString
+            skipEnabled = enabled
+            if sourceChanged {
+                skipSession.reset()
+                skipFetchVideoID = nil
+                refreshSkipSegments()
+                return
+            }
+            if enabledChanged, enabled {
+                if skipSession.segments.isEmpty {
+                    refreshSkipSegments()
+                } else if let time = player?.currentTime().seconds {
+                    considerSponsorSkip(at: time)
+                }
+            }
+        }
+
+        private func refreshSkipSegments() {
+            skipFetchTask?.cancel()
+            skipFetchTask = nil
+            guard skipEnabled else { return }
+            guard let videoID = YouTubeVideoID.extract(from: sourceURLString) else { return }
+            if skipFetchVideoID == videoID, !skipSession.segments.isEmpty { return }
+            skipFetchVideoID = videoID
+            skipFetchTask = SponsorBlockClient.fetch(videoID: videoID) { [weak self] segments in
+                guard let self, self.skipFetchVideoID == videoID else { return }
+                self.skipSession.replaceSegments(segments)
+                if let time = self.player?.currentTime().seconds {
+                    self.considerSponsorSkip(at: time)
+                }
+            }
+        }
+
+        private func considerSponsorSkip(at time: Double) {
+            guard skipEnabled, !resumeSeekPending, seekSession.pendingTime == nil, player != nil else { return }
+            guard let decision = skipSession.consumeSkip(at: time), let player else { return }
+            let shouldPlay = player.timeControlStatus != .paused
+            reachedEnd = false
+            beginSeek(player: player, to: decision.end, shouldPlay: shouldPlay)
+            onProgress(decision.end)
+            onSponsorSkip(decision.skippedDuration)
         }
 
         private func togglePlayback() {
@@ -1508,7 +1623,66 @@ struct LocalVideoPlayer: NSViewRepresentable {
             }
             if restoreInline {
                 publishCurrentSubtitle(animated: false)
+                consumePendingAsk()
+            } else {
+                cancelPendingAsk()
             }
+        }
+
+        private func handleAskQuestion() -> Bool {
+            if backgroundPanel != nil { return false }
+            setPlayback(false)
+            let window = fullscreenWindow ?? playerView?.window
+            let inNativeFullscreen = window?.styleMask.contains(.fullScreen) ?? false
+            if isVideoFullscreen || inNativeFullscreen {
+                pendingAskAfterFullscreen = true
+                if !isVideoFullscreen, let window {
+                    observeAskAfterNativeFullscreen(window)
+                }
+                if exitFullscreen() {
+                    return true
+                }
+                cancelPendingAsk()
+                if isVideoFullscreen {
+                    return true
+                }
+            }
+            presentAskOverlay()
+            return true
+        }
+
+        private func observeAskAfterNativeFullscreen(_ window: NSWindow) {
+            removeAskAfterFullscreenObserver()
+            askAfterFullscreenObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didExitFullScreenNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.consumePendingAsk()
+            }
+        }
+
+        private func consumePendingAsk() {
+            removeAskAfterFullscreenObserver()
+            guard pendingAskAfterFullscreen else { return }
+            pendingAskAfterFullscreen = false
+            presentAskOverlay()
+        }
+
+        private func cancelPendingAsk() {
+            pendingAskAfterFullscreen = false
+            removeAskAfterFullscreenObserver()
+        }
+
+        private func presentAskOverlay() {
+            onAskQuestion()
+        }
+
+        private func removeAskAfterFullscreenObserver() {
+            if let askAfterFullscreenObserver {
+                NotificationCenter.default.removeObserver(askAfterFullscreenObserver)
+            }
+            askAfterFullscreenObserver = nil
         }
 
         private func removeFullscreenObservers() {
@@ -1642,7 +1816,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
 
             // Move the existing player output only after the panel is fully
             // configured. The panel is shown at its final location, so the sole
-            // transition is opacity—there is never a position animation.
+            // transition is opacity; there is never a position animation.
             playerView?.playerLayer.player = nil
             fullscreenPlayerView?.playerLayer.player = nil
             floatingView.player = player
@@ -1810,6 +1984,13 @@ struct LocalVideoPlayer: NSViewRepresentable {
         }
 
         func stop() {
+            skipFetchTask?.cancel()
+            skipFetchTask = nil
+            skipFetchVideoID = nil
+            skipSession.reset()
+            sourceURLString = ""
+            resumeSeekPending = false
+            cancelPendingAsk()
             _ = exitFullscreen()
             hideBackgroundPlayer(animated: false, restoreInline: false)
             finishFullscreenPresentation(restoreInline: false)

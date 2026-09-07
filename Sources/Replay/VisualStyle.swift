@@ -1,6 +1,82 @@
 import AppKit
 import SwiftUI
 
+enum PaneHeaderIconMetrics {
+    static let minHitSize: CGFloat = 24
+    static let spacing: CGFloat = 12
+    static let hoverDelay: TimeInterval = 0
+}
+
+struct PaneHeaderIconLabel: View {
+    let systemImage: String
+    let title: String
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 12, weight: .semibold))
+            .frame(
+                minWidth: PaneHeaderIconMetrics.minHitSize,
+                minHeight: PaneHeaderIconMetrics.minHitSize
+            )
+            .contentShape(Rectangle())
+            .accessibilityLabel(title)
+    }
+}
+
+enum TitlebarTooltipLayout {
+    static let gap: CGFloat = 4
+
+    static func panelFrame(
+        hostRectOnScreen: NSRect,
+        tooltipSize: NSSize,
+        visibleFrame: NSRect,
+        gap: CGFloat = gap
+    ) -> NSRect {
+        var frame = NSRect(
+            x: hostRectOnScreen.midX - tooltipSize.width / 2,
+            y: hostRectOnScreen.minY - gap - tooltipSize.height,
+            width: tooltipSize.width,
+            height: tooltipSize.height
+        )
+        if frame.minX < visibleFrame.minX {
+            frame.origin.x = visibleFrame.minX
+        }
+        if frame.maxX > visibleFrame.maxX {
+            frame.origin.x = visibleFrame.maxX - frame.width
+        }
+        if frame.minY < visibleFrame.minY {
+            frame.origin.y = hostRectOnScreen.maxY + gap
+        }
+        if frame.maxY > visibleFrame.maxY {
+            frame.origin.y = visibleFrame.maxY - frame.height
+        }
+        if frame.minX < visibleFrame.minX {
+            frame.origin.x = visibleFrame.minX
+        }
+        if frame.maxX > visibleFrame.maxX {
+            frame.origin.x = visibleFrame.maxX - frame.width
+        }
+        return frame
+    }
+}
+
+struct TitlebarTooltipChrome: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(OpenMyChrome.ink)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .watchGlass(
+                .regular,
+                in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusSm, style: .continuous)
+            )
+            .fixedSize()
+    }
+}
+
 enum DetailHeaderMetrics {
     static let collapsedLeadingPadding: CGFloat = 154
     static let expandedLeadingPadding: CGFloat = 56
@@ -88,6 +164,73 @@ struct WatchGlassContainer<Content: View>: View {
     }
 }
 
+enum WindowChromeMetrics {
+    static let minimumSize = NSSize(width: 980, height: 640)
+
+    static func clamp(_ size: NSSize) -> NSSize {
+        NSSize(
+            width: max(size.width, minimumSize.width),
+            height: max(size.height, minimumSize.height)
+        )
+    }
+
+    /// 最小尺寸必须写在窗口上。SwiftUI 布局之后会用自己的 contentMinSize 覆盖
+    /// NSWindow.minSize，所以每次配置和尺寸变化都要重新断言。
+    static func applyMinimumSize(to window: NSWindow) {
+        window.minSize = minimumSize
+        window.contentMinSize = minimumSize
+        guard window.frame.width + 0.5 < minimumSize.width
+            || window.frame.height + 0.5 < minimumSize.height else { return }
+        var frame = window.frame
+        let repairedHeight = max(frame.height, minimumSize.height)
+        frame.origin.y -= repairedHeight - frame.height
+        frame.size.width = max(frame.width, minimumSize.width)
+        frame.size.height = repairedHeight
+        window.setFrame(frame, display: true, animate: false)
+    }
+}
+
+/// 转发原窗口代理，并在用户拖拽时钳制最小尺寸。
+final class WindowMinSizeGuard: NSObject, NSWindowDelegate {
+    private weak var original: NSWindowDelegate?
+    private weak var observedWindow: NSWindow?
+
+    func install(on window: NSWindow) {
+        if observedWindow === window, window.delegate === self { return }
+        if window.delegate !== self {
+            original = window.delegate
+        }
+        observedWindow = window
+        window.delegate = self
+    }
+
+    func detach() {
+        if let window = observedWindow, window.delegate === self {
+            window.delegate = original
+        }
+        observedWindow = nil
+        original = nil
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        super.responds(to: aSelector) || (original?.responds(to: aSelector) ?? false)
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        original
+    }
+
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        sender.minSize = WindowChromeMetrics.minimumSize
+        sender.contentMinSize = WindowChromeMetrics.minimumSize
+        var size = WindowChromeMetrics.clamp(frameSize)
+        if let original, original.responds(to: #selector(NSWindowDelegate.windowWillResize(_:to:))) {
+            size = WindowChromeMetrics.clamp(original.windowWillResize?(sender, to: size) ?? size)
+        }
+        return size
+    }
+}
+
 struct WindowStyleConfigurator: NSViewRepresentable {
     let title: String
 
@@ -97,6 +240,8 @@ struct WindowStyleConfigurator: NSViewRepresentable {
         weak var alignedWindow: NSWindow?
         let activationClickShield = ForegroundActivationClickShield()
         let windowFocusController = PlaybackWindowFocusController()
+        let minSizeGuard = WindowMinSizeGuard()
+        private var resizeObserver: NSObjectProtocol?
 
         func centerTrafficLights(in window: NSWindow) {
             guard alignedWindow !== window else { return }
@@ -160,6 +305,30 @@ struct WindowStyleConfigurator: NSViewRepresentable {
                 }
             }
         }
+
+        func attachMinimumSize(to window: NSWindow) {
+            minSizeGuard.install(on: window)
+            WindowChromeMetrics.applyMinimumSize(to: window)
+            guard resizeObserver == nil else { return }
+            resizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification,
+                object: window,
+                queue: .main
+            ) { [weak window] _ in
+                guard let window else { return }
+                WindowChromeMetrics.applyMinimumSize(to: window)
+            }
+        }
+
+        func detach() {
+            if let resizeObserver {
+                NotificationCenter.default.removeObserver(resizeObserver)
+            }
+            resizeObserver = nil
+            minSizeGuard.detach()
+            activationClickShield.detach()
+            windowFocusController.detach()
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -177,8 +346,7 @@ struct WindowStyleConfigurator: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
-        coordinator.activationClickShield.detach()
-        coordinator.windowFocusController.detach()
+        coordinator.detach()
     }
 
     private func configure(_ window: NSWindow?, coordinator: Coordinator) {
@@ -203,22 +371,7 @@ struct WindowStyleConfigurator: NSViewRepresentable {
         coordinator.scheduleSidebarToggleAlignment(in: window)
         coordinator.activationClickShield.attach(to: window)
         coordinator.windowFocusController.attach(to: window)
-        let minimumSize = NSSize(width: 980, height: 640)
-        window.minSize = minimumSize
-
-        // AppKit does not automatically enlarge a restored window that was
-        // saved before a newer minimum size was introduced. Such a window can
-        // squeeze NavigationSplitView below its column minimum and center its
-        // overflowing content underneath the traffic lights. Repair that
-        // legacy frame once it is attached, preserving the window's top edge.
-        if window.frame.width < minimumSize.width || window.frame.height < minimumSize.height {
-            var frame = window.frame
-            let repairedHeight = max(frame.height, minimumSize.height)
-            frame.origin.y -= repairedHeight - frame.height
-            frame.size.width = max(frame.width, minimumSize.width)
-            frame.size.height = repairedHeight
-            window.setFrame(frame, display: true, animate: false)
-        }
+        coordinator.attachMinimumSize(to: window)
     }
 }
 
@@ -399,21 +552,148 @@ final class WindowWidthTrackingView: NSView {
 /// an invisible marker, then constrains the interactive content directly to
 /// that marker above the toolbar so it follows pane and window layout changes.
 private final class TitlebarHostingView<Content: View>: NSHostingView<Content> {
+    var tooltipText = "" {
+        didSet {
+            guard oldValue != tooltipText else { return }
+            updateTrackingAreas()
+            if tooltipText.isEmpty {
+                hideTooltip()
+            }
+        }
+    }
+
+    private var hoverTrackingArea: NSTrackingArea?
+    private var tooltipPanel: NSPanel?
+    private var tooltipContent: NSHostingView<TitlebarTooltipChrome>?
+
     // NSThemeFrame advertises the native title-bar safe area to descendants.
     // This detached overlay already lives inside that area, so inheriting it
     // would add 52 points to its fitting height and clip the real controls.
     override var safeAreaInsets: NSEdgeInsets { NSEdgeInsets() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+            self.hoverTrackingArea = nil
+        }
+        guard !tooltipText.isEmpty else { return }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        showTooltip()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hideTooltip()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            hideTooltip()
+        }
+    }
+
+    func repositionTooltipIfNeeded() {
+        guard tooltipPanel?.isVisible == true else { return }
+        tooltipPanel?.setFrame(currentTooltipFrame(), display: true)
+    }
+
+    func dismissTooltip() {
+        hideTooltip()
+        tooltipPanel?.close()
+        tooltipPanel = nil
+        tooltipContent = nil
+    }
+
+    private func showTooltip() {
+        guard !tooltipText.isEmpty, window != nil else { return }
+        let panel = tooltipPanel ?? makePanel()
+        tooltipPanel = panel
+        let content = tooltipContent ?? NSHostingView(rootView: TitlebarTooltipChrome(text: tooltipText))
+        content.rootView = TitlebarTooltipChrome(text: tooltipText)
+        let size = content.fittingSize
+        content.frame = NSRect(origin: .zero, size: size)
+        panel.contentView = content
+        tooltipContent = content
+        panel.setContentSize(size)
+        panel.setFrame(currentTooltipFrame(), display: true)
+        if let window, panel.parent !== window {
+            window.addChildWindow(panel, ordered: .above)
+        }
+        panel.level = .floating
+        panel.orderFront(nil)
+    }
+
+    private func hideTooltip() {
+        guard let panel = tooltipPanel else { return }
+        if let parent = panel.parent {
+            parent.removeChildWindow(panel)
+        }
+        panel.orderOut(nil)
+    }
+
+    private func currentTooltipFrame() -> NSRect {
+        let hostOnScreen = window?.convertToScreen(convert(bounds, to: nil)) ?? .zero
+        let size = tooltipContent?.fittingSize
+            ?? NSHostingView(rootView: TitlebarTooltipChrome(text: tooltipText)).fittingSize
+        let visible = window?.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? hostOnScreen
+        return TitlebarTooltipLayout.panelFrame(
+            hostRectOnScreen: hostOnScreen,
+            tooltipSize: size,
+            visibleFrame: visible
+        )
+    }
+
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 40, height: 20)),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.level = .floating
+        panel.ignoresMouseEvents = true
+        panel.hasShadow = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.setAccessibilityIdentifier("titlebar-tooltip-panel")
+        panel.identifier = NSUserInterfaceItemIdentifier("titlebar-tooltip-panel")
+        return panel
+    }
+
+    deinit {
+        tooltipPanel?.close()
+        tooltipPanel = nil
+    }
 }
 
 struct TitlebarInteractiveHost<Content: View>: NSViewRepresentable {
+    var tooltip: String
     private let content: Content
 
-    init(@ViewBuilder content: () -> Content) {
+    init(tooltip: String = "", @ViewBuilder content: () -> Content) {
+        self.tooltip = tooltip
         self.content = content()
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(content: content)
+        Coordinator(content: content, tooltip: tooltip)
     }
 
     func makeNSView(context: Context) -> TitlebarInteractiveMarkerView {
@@ -423,7 +703,7 @@ struct TitlebarInteractiveHost<Content: View>: NSViewRepresentable {
     }
 
     func updateNSView(_ marker: TitlebarInteractiveMarkerView, context: Context) {
-        context.coordinator.update(content: content)
+        context.coordinator.update(content: content, tooltip: tooltip)
     }
 
     static func dismantleNSView(
@@ -440,10 +720,12 @@ struct TitlebarInteractiveHost<Content: View>: NSViewRepresentable {
         private var windowResizeObserver: NSObjectProtocol?
         private var layoutObservers: [NSObjectProtocol] = []
 
-        init(content: Content) {
+        init(content: Content, tooltip: String) {
             hostingView = TitlebarHostingView(rootView: Self.hosted(content))
             hostingView.wantsLayer = true
             hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+            hostingView.setAccessibilityIdentifier("titlebar-interactive-overlay")
+            hostingView.tooltipText = tooltip
         }
 
         func attach(to marker: TitlebarInteractiveMarkerView) {
@@ -463,7 +745,8 @@ struct TitlebarInteractiveHost<Content: View>: NSViewRepresentable {
             }
         }
 
-        func update(content: Content) {
+        func update(content: Content, tooltip: String) {
+            hostingView.tooltipText = tooltip
             hostingView.rootView = Self.hosted(content)
             hostingView.invalidateIntrinsicContentSize()
             marker?.invalidateIntrinsicContentSize()
@@ -475,6 +758,7 @@ struct TitlebarInteractiveHost<Content: View>: NSViewRepresentable {
             marker?.intrinsicSizeProvider = nil
             marker?.layoutHandler = nil
             stopObservingWindow()
+            hostingView.dismissTooltip()
             hostingView.removeFromSuperview()
             marker = nil
         }
@@ -592,15 +876,17 @@ struct TitlebarInteractiveHost<Content: View>: NSViewRepresentable {
             // for marker safe areas or NSThemeFrame bounds, both of which can
             // change across window states. Horizontal placement remains
             // entirely marker-driven.
-            let titleRowHeight: CGFloat = 56
+            let titleRowHeight = OpenMyChrome.paneHeaderHeight
             let verticalInset = (titleRowHeight - markerFrame.height) / 2
             let controlBottomOnScreen = window.frame.maxY - verticalInset - markerFrame.height
             let controlBottomInWindow = window.convertPoint(
                 fromScreen: NSPoint(x: window.frame.minX, y: controlBottomOnScreen)
             )
             markerFrame.origin.y = windowFrameView.convert(controlBottomInWindow, from: nil).y
-            guard hostingView.frame != markerFrame else { return }
-            hostingView.frame = markerFrame
+            if hostingView.frame != markerFrame {
+                hostingView.frame = markerFrame
+            }
+            hostingView.repositionTooltipIfNeeded()
         }
 
         private static func hosted(_ content: Content) -> AnyView {

@@ -33,7 +33,8 @@ enum ReplayMigration {
         "playbackVolume",
         "subtitlesEnabled",
         "chaptersPresented",
-        "queueOrderVersion"
+        "queueOrderVersion",
+        "skipSponsorSegments"
     ]
 
     static func migrateDirectories(
