@@ -60,7 +60,7 @@ struct DigestSessionCheck {
         precondition(!DigestCopy.missingKeyHint.contains("defaults"))
         precondition(!DigestCopy.missingKeyHint.contains("AnthropicAPIKey"))
         precondition(!DigestCopy.missingKeyHint.contains("GeminiAPIKey"))
-        precondition(DigestCopy.viewConfigTitle == "查看配置方法")
+        precondition(DigestCopy.viewConfigTitle == "打开设置…")
     }
 
     @MainActor

@@ -90,15 +90,23 @@ struct DigestAPICheck {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        precondition(DigestProvider.resolve(defaults: defaults) == .anthropic, "缺省须为 anthropic")
+        precondition(DigestProvider.resolve(defaults: defaults, environment: [:]) == .gemini, "没有任何密钥时缺省 Gemini（可免费申请）")
+        precondition(
+            DigestProvider.resolve(defaults: defaults, environment: ["ANTHROPIC_API_KEY": "sk-1"]) == .anthropic,
+            "只有 Anthropic 密钥时按密钥推断"
+        )
+        precondition(
+            DigestProvider.resolve(defaults: defaults, environment: ["ANTHROPIC_API_KEY": "sk-1", "GEMINI_API_KEY": "g"]) == .gemini,
+            "两家都有时优先 Gemini"
+        )
         defaults.set("gemini", forKey: DigestProvider.defaultsKey)
-        precondition(DigestProvider.resolve(defaults: defaults) == .gemini)
+        precondition(DigestProvider.resolve(defaults: defaults, environment: [:]) == .gemini)
         defaults.set(" GEMINI ", forKey: DigestProvider.defaultsKey)
-        precondition(DigestProvider.resolve(defaults: defaults) == .gemini, "大小写与空白须忽略")
+        precondition(DigestProvider.resolve(defaults: defaults, environment: [:]) == .gemini, "大小写与空白须忽略")
         defaults.set("anthropic", forKey: DigestProvider.defaultsKey)
-        precondition(DigestProvider.resolve(defaults: defaults) == .anthropic)
+        precondition(DigestProvider.resolve(defaults: defaults, environment: ["GEMINI_API_KEY": "g"]) == .anthropic, "明确选择优先于密钥推断")
         defaults.set("unknown", forKey: DigestProvider.defaultsKey)
-        precondition(DigestProvider.resolve(defaults: defaults) == .anthropic, "未知值回落 anthropic")
+        precondition(DigestProvider.resolve(defaults: defaults, environment: [:]) == .gemini, "未知值按无选择处理")
         precondition(DigestProvider.defaultsKey == "DigestProvider")
     }
 

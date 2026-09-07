@@ -2,10 +2,7 @@ import Foundation
 
 enum DigestCopy {
     static let missingKeyHint = "还没有配置 AI 密钥，配置后即可使用解释与目录。"
-    static let viewConfigTitle = "查看配置方法"
-    static let keySetupURL = URL(
-        string: "https://github.com/sefuzhou770801-hub/replay/blob/汉化/README.md#配置-ai-密钥"
-    )
+    static let viewConfigTitle = "打开设置…"
     static let noSubtitles = "这段没有字幕"
     static let writeFailed = "这次没写成"
     static let requestFailed = "暂时没拿到结果，请重试"

@@ -300,8 +300,7 @@ struct DigestMissingKeyHint: View {
     }
 
     private func openSetup() {
-        guard let url = DigestCopy.keySetupURL else { return }
-        NSWorkspace.shared.open(url)
+        DigestSettingsOpener.open()
     }
 }
 
