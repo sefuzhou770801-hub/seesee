@@ -20,7 +20,6 @@ enum DigestSettingsCopy {
     static let gearTitle = "设置"
     static let dataSectionTitle = "数据位置"
     static let mediaLabel = "影片"
-    static let mediaNote = "下载的视频与字幕都在这里，删除文件请先在应用里移出待播清单。"
     static let revealTitle = "打开"
 
     static func serviceStatus(_ detail: String) -> String {

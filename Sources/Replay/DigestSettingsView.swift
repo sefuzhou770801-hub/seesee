@@ -75,12 +75,6 @@ struct DigestSettingsView: View {
                     Spacer(minLength: 8)
                     secondaryButton(DigestSettingsCopy.revealTitle, action: model.revealMediaFolder)
                 }
-                row("") {
-                    Text(DigestSettingsCopy.mediaNote)
-                        .font(.system(size: 11))
-                        .foregroundStyle(OpenMyChrome.faint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
         .padding(20)
