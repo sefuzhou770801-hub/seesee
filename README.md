@@ -70,24 +70,12 @@ seesee 不止想做一个更干净的播放器。我们相信下一代播放器�
 
 ## 配置 AI 密钥
 
-解释与目录需要 API 密钥。任选一路即可。
+解释与目录需要一把模型密钥。打开菜单栏「seesee › 设置…」（⌘,），选好服务、粘贴密钥即可。密钥只保存在本机，只在你点「解释」或「生成目录」时把那段字幕发给模型。
 
-Anthropic（默认）：
+- Gemini：在 [Google AI Studio](https://aistudio.google.com/apikey) 免费申请，不用绑卡（推荐）。
+- Anthropic：在 [Anthropic Console](https://console.anthropic.com/settings/keys) 申请，按用量付费。
 
-```sh
-defaults write com.mg.replay AnthropicAPIKey -string sk-你的密钥
-```
-
-或设置环境变量 `ANTHROPIC_API_KEY`。
-
-Gemini：
-
-```sh
-defaults write com.mg.replay GeminiAPIKey -string 你的密钥
-defaults write com.mg.replay DigestProvider -string gemini
-```
-
-或设置环境变量 `GEMINI_API_KEY`。
+也可以用环境变量 `GEMINI_API_KEY` 或 `ANTHROPIC_API_KEY`。
 
 ## 数据与隐私
 

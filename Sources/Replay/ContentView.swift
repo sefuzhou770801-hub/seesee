@@ -2287,6 +2287,7 @@ private struct ChapterSidebar: View {
                                     )
                                     .onAppear(perform: autoGenerateTOCIfNeeded)
                                     .onChange(of: subtitleCues) { _ in autoGenerateTOCIfNeeded() }
+                                    .onChange(of: digest.apiKeyRevision) { _ in autoGenerateTOCIfNeeded() }
                                 }
                                 if !digest.showsHighlightsOnly {
                                     ForEach(qaInsertions.leading) { entry in

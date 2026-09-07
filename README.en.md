@@ -68,6 +68,15 @@ Videos download in the background and are stored locally for offline playback. Y
 | `F` | Toggle fullscreen |
 | Vertical scroll over video | Adjust volume |
 
+## AI key
+
+Explain and Table of Contents call a language model, so they need an API key. Open **seesee › Settings…** (⌘,), pick a provider and paste the key. It stays on this Mac, and subtitle excerpts are sent only when you ask for an explanation or a table of contents.
+
+- Gemini: free key from [Google AI Studio](https://aistudio.google.com/apikey), no card required (recommended).
+- Anthropic: key from the [Anthropic Console](https://console.anthropic.com/settings/keys), pay as you go.
+
+The environment variables `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` also work.
+
 ## Data and privacy
 
 - Downloaded media: `~/Movies/Replay`

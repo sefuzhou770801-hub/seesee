@@ -68,6 +68,15 @@ Apple Silicon（M シリーズ）専用、macOS 13 以降が必要です。yt-dl
 | `F` | フルスクリーン切り替え |
 | 動画上で縦スクロール | 音量調整 |
 
+## AI キーの設定
+
+「解説」と「目次」は言語モデルを呼び出すため API キーが必要です。メニューバーの **seesee › 設定…**（⌘,）を開き、サービスを選んでキーを貼り付けてください。キーはこの Mac にだけ保存され、字幕の抜粋が送られるのは解説や目次を求めたときだけです。
+
+- Gemini：[Google AI Studio](https://aistudio.google.com/apikey) で無料取得、カード登録不要（推奨）。
+- Anthropic：[Anthropic Console](https://console.anthropic.com/settings/keys) で取得、従量課金。
+
+環境変数 `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` でも設定できます。
+
 ## データとプライバシー
 
 - ダウンロードした動画：`~/Movies/Replay`

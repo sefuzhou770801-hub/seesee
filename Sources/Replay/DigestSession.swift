@@ -40,12 +40,45 @@ final class DigestSession: ObservableObject {
     private var noteDeleteTask: Task<Void, Never>?
     private var noteSavedTask: Task<Void, Never>?
 
+    /// 密钥有无发生变化时递增，视图据此重新读取 hasAPIKey。
+    @Published var apiKeyRevision = 0
+    private var lastHasAPIKey: Bool?
+    private var defaultsObserver: NSObjectProtocol?
+
+    init() {
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshAPIKeyState() }
+        }
+    }
+
+    deinit {
+        if let defaultsObserver {
+            NotificationCenter.default.removeObserver(defaultsObserver)
+        }
+    }
+
     var hasAPIKey: Bool {
         DigestAPIKey.resolve(
-            provider: DigestProvider.resolve(defaults: apiKeyDefaults),
+            provider: DigestProvider.resolve(defaults: apiKeyDefaults, environment: apiKeyEnvironment),
             defaults: apiKeyDefaults,
             environment: apiKeyEnvironment
         ) != nil
+    }
+
+    /// 设置窗口写入密钥后：撤掉「还没有配置密钥」提示，让刚才没做成的目录自动补做。
+    func refreshAPIKeyState() {
+        let current = hasAPIKey
+        guard current != lastHasAPIKey else { return }
+        lastHasAPIKey = current
+        apiKeyRevision += 1
+        guard current else { return }
+        if overviewMessage == DigestCopy.missingKeyHint { overviewMessage = nil }
+        if explainMessage == DigestCopy.missingKeyHint { explainMessage = nil }
+        explainMessageByCue = explainMessageByCue.filter { $0.value != DigestCopy.missingKeyHint }
     }
 
     /// 启动首选条目与切换视频共用：同一条目已加载则跳过。
@@ -447,13 +480,15 @@ final class DigestSession: ObservableObject {
         chapters: [VideoChapter] = []
     ) {
         guard !isGeneratingOverview else { return }
-        let provider = DigestProvider.resolve(defaults: apiKeyDefaults)
+        let provider = DigestProvider.resolve(defaults: apiKeyDefaults, environment: apiKeyEnvironment)
         guard let apiKey = DigestAPIKey.resolve(
             provider: provider,
             defaults: apiKeyDefaults,
             environment: apiKeyEnvironment
         ) else {
             overviewMessage = DigestCopy.missingKeyHint
+            lastHasAPIKey = false
+            shouldAutoGenerateOverview = true
             return
         }
         guard !cues.isEmpty else {
@@ -581,7 +616,7 @@ final class DigestSession: ObservableObject {
         let selected = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selected.isEmpty else { return }
         let cueIndex = selectedCueIndex ?? 0
-        let provider = DigestProvider.resolve(defaults: apiKeyDefaults)
+        let provider = DigestProvider.resolve(defaults: apiKeyDefaults, environment: apiKeyEnvironment)
         guard let apiKey = DigestAPIKey.resolve(
             provider: provider,
             defaults: apiKeyDefaults,

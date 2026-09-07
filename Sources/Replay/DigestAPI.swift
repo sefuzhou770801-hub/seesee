@@ -97,11 +97,18 @@ enum DigestProviderKind: String {
 enum DigestProvider {
     static let defaultsKey = "DigestProvider"
 
-    static func resolve(defaults: UserDefaults = .standard) -> DigestProviderKind {
+    static func resolve(
+        defaults: UserDefaults = .standard,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> DigestProviderKind {
         let raw = defaults.string(forKey: defaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        return DigestProviderKind(rawValue: raw) ?? .anthropic
+        if let explicit = DigestProviderKind(rawValue: raw) { return explicit }
+        // 没有明确选择：有哪家的密钥就用哪家；都没有时默认 Gemini（可免费申请）。
+        if DigestGeminiAPIKey.resolve(defaults: defaults, environment: environment) != nil { return .gemini }
+        if WatchQAAPIKey.resolve(defaults: defaults, environment: environment) != nil { return .anthropic }
+        return .gemini
     }
 }
 
