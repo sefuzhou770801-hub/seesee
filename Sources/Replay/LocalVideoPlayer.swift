@@ -1102,9 +1102,12 @@ struct LocalVideoPlayer: NSViewRepresentable {
     let seekRequest: PlayerSeekRequest?
     let subtitleTrack: VideoSubtitleTrack?
     let subtitleMode: SubtitleDisplayMode
+    let sourceURLString: String
+    let skipSponsorsEnabled: Bool
     let onProgress: (Double) -> Void
     let onStateChange: (PlaybackSnapshot) -> Void
     let onVolumeChange: (Double) -> Void
+    let onSponsorSkip: (Double) -> Void
     let onEnded: () -> Void
     let onAskQuestion: () -> Void
 
@@ -1113,6 +1116,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
             onProgress: onProgress,
             onStateChange: onStateChange,
             onVolumeChange: onVolumeChange,
+            onSponsorSkip: onSponsorSkip,
             onEnded: onEnded,
             onAskQuestion: onAskQuestion
         )
@@ -1131,6 +1135,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
         view.addGestureRecognizer(click)
         context.coordinator.load(url: url, title: title, author: author, resumeAt: resumeAt, into: view)
         context.coordinator.updateSubtitles(track: subtitleTrack, mode: subtitleMode)
+        context.coordinator.updateSponsorSkip(sourceURLString: sourceURLString, enabled: skipSponsorsEnabled)
         return view
     }
 
@@ -1150,10 +1155,12 @@ struct LocalVideoPlayer: NSViewRepresentable {
         if context.coordinator.currentURL != url {
             context.coordinator.load(url: url, title: title, author: author, resumeAt: resumeAt, into: view)
             context.coordinator.updateSubtitles(track: subtitleTrack, mode: subtitleMode)
+            context.coordinator.updateSponsorSkip(sourceURLString: sourceURLString, enabled: skipSponsorsEnabled)
             return
         }
         context.coordinator.updateMetadata(title: title, author: author)
         context.coordinator.updateSubtitles(track: subtitleTrack, mode: subtitleMode)
+        context.coordinator.updateSponsorSkip(sourceURLString: sourceURLString, enabled: skipSponsorsEnabled)
         if let seekRequest {
             context.coordinator.seek(to: seekRequest)
         }
@@ -1186,11 +1193,18 @@ struct LocalVideoPlayer: NSViewRepresentable {
         private let onProgress: (Double) -> Void
         private let onStateChange: (PlaybackSnapshot) -> Void
         private let onVolumeChange: (Double) -> Void
+        private let onSponsorSkip: (Double) -> Void
         private let onEnded: () -> Void
         fileprivate var onAskQuestion: () -> Void
         private var pendingAskAfterFullscreen = false
         private var askAfterFullscreenObserver: NSObjectProtocol?
         private var lastSeekRequestID: UUID?
+        private var sourceURLString = ""
+        private var skipEnabled = true
+        private var skipSession = SponsorSkipSession()
+        private var skipFetchTask: URLSessionDataTask?
+        private var skipFetchVideoID: String?
+        private var resumeSeekPending = false
         private var seekSession = SubtitleSeekSession()
         private var commandToken: UUID?
         private var preferredRate: Double = 1
@@ -1204,12 +1218,14 @@ struct LocalVideoPlayer: NSViewRepresentable {
             onProgress: @escaping (Double) -> Void,
             onStateChange: @escaping (PlaybackSnapshot) -> Void,
             onVolumeChange: @escaping (Double) -> Void,
+            onSponsorSkip: @escaping (Double) -> Void,
             onEnded: @escaping () -> Void,
             onAskQuestion: @escaping () -> Void
         ) {
             self.onProgress = onProgress
             self.onStateChange = onStateChange
             self.onVolumeChange = onVolumeChange
+            self.onSponsorSkip = onSponsorSkip
             self.onEnded = onEnded
             self.onAskQuestion = onAskQuestion
             super.init()
@@ -1281,6 +1297,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 guard let self else { return }
                 self.publishSnapshot()
                 self.publishSubtitle(at: self.subtitleClockTime(playerTime: time.seconds), animated: true)
+                self.considerSponsorSkip(at: time.seconds)
             }
             endObserver = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
@@ -1292,9 +1309,13 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 self?.onEnded()
             }
             if resumeAt > 0 {
+                resumeSeekPending = true
                 let time = CMTime(seconds: resumeAt, preferredTimescale: 600)
                 player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-                    self?.publishSnapshot()
+                    guard let self else { return }
+                    self.resumeSeekPending = false
+                    self.publishSnapshot()
+                    self.considerSponsorSkip(at: resumeAt)
                 }
             } else {
                 publishSnapshot()
@@ -1362,7 +1383,54 @@ struct LocalVideoPlayer: NSViewRepresentable {
                 if shouldPlay { self.startPlayback(player) }
                 self.publishSnapshot()
                 self.publishSubtitle(at: seekTime, animated: false)
+                self.considerSponsorSkip(at: seekTime)
             }
+        }
+
+        func updateSponsorSkip(sourceURLString: String, enabled: Bool) {
+            let sourceChanged = self.sourceURLString != sourceURLString
+            let enabledChanged = skipEnabled != enabled
+            self.sourceURLString = sourceURLString
+            skipEnabled = enabled
+            if sourceChanged {
+                skipSession.reset()
+                skipFetchVideoID = nil
+                refreshSkipSegments()
+                return
+            }
+            if enabledChanged, enabled {
+                if skipSession.segments.isEmpty {
+                    refreshSkipSegments()
+                } else if let time = player?.currentTime().seconds {
+                    considerSponsorSkip(at: time)
+                }
+            }
+        }
+
+        private func refreshSkipSegments() {
+            skipFetchTask?.cancel()
+            skipFetchTask = nil
+            guard skipEnabled else { return }
+            guard let videoID = YouTubeVideoID.extract(from: sourceURLString) else { return }
+            if skipFetchVideoID == videoID, !skipSession.segments.isEmpty { return }
+            skipFetchVideoID = videoID
+            skipFetchTask = SponsorBlockClient.fetch(videoID: videoID) { [weak self] segments in
+                guard let self, self.skipFetchVideoID == videoID else { return }
+                self.skipSession.replaceSegments(segments)
+                if let time = self.player?.currentTime().seconds {
+                    self.considerSponsorSkip(at: time)
+                }
+            }
+        }
+
+        private func considerSponsorSkip(at time: Double) {
+            guard skipEnabled, !resumeSeekPending, seekSession.pendingTime == nil, player != nil else { return }
+            guard let decision = skipSession.consumeSkip(at: time), let player else { return }
+            let shouldPlay = player.timeControlStatus != .paused
+            reachedEnd = false
+            beginSeek(player: player, to: decision.end, shouldPlay: shouldPlay)
+            onProgress(decision.end)
+            onSponsorSkip(decision.skippedDuration)
         }
 
         private func togglePlayback() {
@@ -1916,6 +1984,12 @@ struct LocalVideoPlayer: NSViewRepresentable {
         }
 
         func stop() {
+            skipFetchTask?.cancel()
+            skipFetchTask = nil
+            skipFetchVideoID = nil
+            skipSession.reset()
+            sourceURLString = ""
+            resumeSeekPending = false
             cancelPendingAsk()
             _ = exitFullscreen()
             hideBackgroundPlayer(animated: false, restoreInline: false)

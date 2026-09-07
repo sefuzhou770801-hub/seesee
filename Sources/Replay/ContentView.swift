@@ -905,6 +905,10 @@ private struct VideoDetail: View {
     @State private var volumeHUDValue = PlaybackVolumePreference.load()
     @State private var volumeHUDVisible = false
     @State private var volumeHUDDismissalTask: Task<Void, Never>?
+    @AppStorage("skipSponsorSegments") private var skipSponsorsEnabled = true
+    @State private var skipHUDDuration: Double?
+    @State private var skipHUDVisible = false
+    @State private var skipHUDDismissalTask: Task<Void, Never>?
     @StateObject private var watchQA = WatchQASession()
     @StateObject private var digest = DigestSession()
     @FocusState private var isQuestionFieldFocused: Bool
@@ -942,6 +946,7 @@ private struct VideoDetail: View {
             subtitleLoadTask?.cancel()
             qaLoadTask?.cancel()
             volumeHUDDismissalTask?.cancel()
+            skipHUDDismissalTask?.cancel()
             PlaybackCommandCenter.shared.setAskOverlayDismissHandler(nil)
             watchQA.dismiss(resume: false)
         }
@@ -1138,6 +1143,9 @@ private struct VideoDetail: View {
                             hasSubtitles: subtitleTrack != nil,
                             subtitleMode: subtitleMode,
                             toggleSubtitles: cycleSubtitleMode,
+                            showsSponsorSkipToggle: YouTubeVideoID.extract(from: item.urlString) != nil,
+                            skipSponsorsEnabled: skipSponsorsEnabled,
+                            toggleSponsorSkip: { skipSponsorsEnabled.toggle() },
                             showsAskQuestion: isWatchQAEnabled,
                             askQuestion: { PlaybackCommandCenter.shared.askQuestion() }
                         )
@@ -1199,9 +1207,12 @@ private struct VideoDetail: View {
                             seekRequest: seekRequest,
                             subtitleTrack: subtitleTrack,
                             subtitleMode: subtitleMode,
+                            sourceURLString: item.urlString,
+                            skipSponsorsEnabled: skipSponsorsEnabled,
                             onProgress: { store.updatePlaybackPosition($0, for: item.id) },
                             onStateChange: { playback = $0 },
                             onVolumeChange: showVolumeHUD,
+                            onSponsorSkip: showSkipHUD,
                             onEnded: { store.markWatched(item.id) },
                             onAskQuestion: { watchQA.present() }
                         )
@@ -1213,7 +1224,12 @@ private struct VideoDetail: View {
                 }
             }
 
-            if volumeHUDVisible {
+            if skipHUDVisible, let skipHUDDuration {
+                PlayerSkipHUD(skippedDuration: skipHUDDuration)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            } else if volumeHUDVisible {
                 PlayerVolumeHUD(
                     volume: volumeHUDValue,
                     isMuted: playback.isMuted || volumeHUDValue <= 0
@@ -1303,6 +1319,21 @@ private struct VideoDetail: View {
             }.value
             guard !Task.isCancelled else { return }
             subtitleTrack = track
+        }
+    }
+
+    private func showSkipHUD(_ skippedDuration: Double) {
+        skipHUDDismissalTask?.cancel()
+        skipHUDDuration = skippedDuration
+        withAnimation(volumeHUDAnimation) {
+            skipHUDVisible = true
+        }
+        skipHUDDismissalTask = Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(volumeHUDAnimation) {
+                skipHUDVisible = false
+            }
         }
     }
 
@@ -1495,6 +1526,30 @@ private struct DetailBackdrop: View, Equatable {
     }
 }
 
+private struct PlayerSkipHUD: View {
+    let skippedDuration: Double
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "forward.end.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+            Text(SponsorSkipMessage.text(skippedDuration: skippedDuration))
+                .font(.system(size: 14, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .background(OpenMyChrome.raise, in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusLg, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: OpenMyChrome.radiusLg, style: .continuous)
+                .strokeBorder(OpenMyChrome.hair)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(SponsorSkipMessage.text(skippedDuration: skippedDuration))
+    }
+}
+
 private struct PlayerVolumeHUD: View {
     let volume: Double
     let isMuted: Bool
@@ -1549,6 +1604,9 @@ private struct PlaybackControls: View {
     let hasSubtitles: Bool
     let subtitleMode: SubtitleDisplayMode
     let toggleSubtitles: () -> Void
+    let showsSponsorSkipToggle: Bool
+    let skipSponsorsEnabled: Bool
+    let toggleSponsorSkip: () -> Void
     let showsAskQuestion: Bool
     let askQuestion: () -> Void
 
@@ -1628,6 +1686,10 @@ private struct PlaybackControls: View {
                 playbackRate: snapshot.playbackRate,
                 select: setPlaybackRate
             )
+
+            if showsSponsorSkipToggle {
+                SponsorSkipPill(isOn: skipSponsorsEnabled, action: toggleSponsorSkip)
+            }
 
             PlayerControlButton(
                 systemImage: subtitleMode == .translationOnly ? "character.bubble" : "captions.bubble",
@@ -1765,6 +1827,39 @@ private struct PlaybackSpeedMenu: View {
 
     private func rateLabel(_ rate: Double) -> String {
         String(format: "%.1f×", rate)
+    }
+}
+
+/// 跳赞助段开关：文字胶囊，与倍速胶囊同款；图标版会被当成「下一章」。
+private struct SponsorSkipPill: View {
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("跳赞助")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.primary.opacity(isOn ? 1 : 0.45))
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background {
+                    if isOn {
+                        Capsule().fill(Color.primary.opacity(0.08))
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .watchGlass(.clear, interactive: true, in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(Color.primary.opacity(0.07))
+        }
+        .fixedSize()
+        .help(isOn ? "正在自动跳过赞助段，点击关闭" : "已关闭自动跳过赞助段，点击打开")
+        .accessibilityLabel("跳过赞助段")
+        .accessibilityValue(isOn ? "开" : "关")
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 }
 

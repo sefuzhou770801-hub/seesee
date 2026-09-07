@@ -65,6 +65,7 @@ compile_and_run playback_command \
     "$project_dir/Sources/Replay/SubtitleOverlayLayout.swift" \
     "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
     "$project_dir/Sources/Replay/SubtitleDispatch.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
     "$project_dir/Sources/Replay/LocalVideoPlayer.swift" \
     "$project_dir/tools/playback_command_check.swift"
 
@@ -416,6 +417,9 @@ compile_and_run subtitle_blocks \
     "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
     "$project_dir/tools/subtitle_blocks_check.swift"
 
+compile_and_run sponsor_skip \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/tools/sponsor_skip_check.swift"
 compile_and_run qa_context \
     "$project_dir/Sources/Replay/WatchItem.swift" \
     "$project_dir/Sources/Replay/ChapterMetadata.swift" \
