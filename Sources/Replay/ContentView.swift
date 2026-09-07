@@ -1048,6 +1048,16 @@ private struct VideoDetail: View {
                 }
                 .fixedSize()
             }
+
+            // 齿轮是整个应用的入口，放最右贴窗口边，与前面针对当前视频的按钮分开。
+            TitlebarInteractiveHost(tooltip: DigestSettingsCopy.gearTitle) {
+                PaneHeaderIconButton(
+                    systemImage: "gearshape",
+                    title: DigestSettingsCopy.gearTitle,
+                    action: { DigestSettingsOpener.open() }
+                )
+            }
+            .fixedSize()
         }
         .padding(.leading, DetailHeaderMetrics.leadingPadding(sidebarCollapsed: sidebarCollapsed))
         .padding(.trailing, 14)
