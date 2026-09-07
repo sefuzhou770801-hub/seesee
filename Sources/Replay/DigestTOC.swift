@@ -58,6 +58,60 @@ enum DigestQuoteNormalize {
         return false
     }
 
+    /// 词元：拉丁按单词，中日韩按相邻两字；用于金句与句块的模糊比对。
+    static func tokens(_ text: String) -> [String] {
+        var out: [String] = []
+        var latin = ""
+        var cjkRun: [String] = []
+        func flushLatin() {
+            if !latin.isEmpty { out.append(latin); latin = "" }
+        }
+        func flushCJK() {
+            if cjkRun.count == 1 { out.append(cjkRun[0]) }
+            else if cjkRun.count > 1 {
+                for i in 0..<(cjkRun.count - 1) { out.append(cjkRun[i] + cjkRun[i + 1]) }
+            }
+            cjkRun = []
+        }
+        for scalar in text.lowercased().unicodeScalars {
+            if isCJK(scalar) {
+                flushLatin()
+                cjkRun.append(String(scalar))
+            } else if CharacterSet.alphanumerics.contains(scalar) {
+                flushCJK()
+                latin.unicodeScalars.append(scalar)
+            } else {
+                flushLatin()
+                flushCJK()
+            }
+        }
+        flushLatin()
+        flushCJK()
+        return out
+    }
+
+    /// needle 的词元有多大比例出现在 haystack 里（按出现次数扣减）。
+    static func overlapRatio(of needle: String, in haystack: String) -> Double {
+        let want = tokens(needle)
+        guard !want.isEmpty else { return 0 }
+        var bag: [String: Int] = [:]
+        for token in tokens(haystack) { bag[token, default: 0] += 1 }
+        var hit = 0
+        for token in want {
+            if let count = bag[token], count > 0 {
+                bag[token] = count - 1
+                hit += 1
+            }
+        }
+        return Double(hit) / Double(want.count)
+    }
+
+    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
+        let value = scalar.value
+        return (0x4E00...0x9FFF).contains(value) || (0x3400...0x4DBF).contains(value)
+            || (0x3040...0x30FF).contains(value) || (0xAC00...0xD7AF).contains(value)
+    }
+
     private static func halfwidth(_ scalar: Unicode.Scalar) -> Unicode.Scalar? {
         let value = scalar.value
         guard (0xFF01...0xFF5E).contains(value) else { return nil }
@@ -270,25 +324,61 @@ enum DigestTOCComposer {
         snapQuoteToCue(quote, range: range, cues: cues) != nil
     }
 
+    /// 金句回查到句块：先整句包含，再句块落在金句里（金句跨块），最后词元重合；同分取时间码最近的句块。
     private static func snapQuoteToCue(
         _ quote: DigestKeyQuote,
         range: Range<Double>,
         cues: [VideoSubtitleCue]
     ) -> DigestKeyQuote? {
-        let inRange = cues.filter { range.contains($0.startTime) }
+        // 章节时间码是按整秒显示值给的，句块起点带小数（40.6 秒显示为 0:41），边界放宽一秒。
+        let lower = range.lowerBound - boundaryTolerance
+        let upper = range.upperBound + boundaryTolerance
+        let inRange = cues.filter { $0.startTime >= lower && $0.startTime < upper }
         guard !inRange.isEmpty else { return nil }
-        guard let cue = inRange.first(where: { cueMatches($0, quote: quote) }) else {
-            return nil
+        var best: (cue: VideoSubtitleCue, score: Double, distance: Double)?
+        for cue in inRange {
+            guard let score = matchScore(quote, block: cue) else { continue }
+            let distance = abs(cue.startTime - quote.timestampSeconds)
+            if let current = best {
+                if score > current.score || (score == current.score && distance < current.distance) {
+                    best = (cue, score, distance)
+                }
+            } else {
+                best = (cue, score, distance)
+            }
         }
-        return quoteFromCue(cue, fallbackTranslation: quote.translation)
+        guard let best else { return nil }
+        return quoteFromCue(best.cue, fallbackTranslation: quote.translation)
     }
 
-    private static func cueMatches(_ cue: VideoSubtitleCue, quote: DigestKeyQuote) -> Bool {
-        DigestQuoteNormalize.looselyMatches(
-            quote: quote.quote,
-            translation: quote.translation,
-            cueText: cue.text
-        )
+    static let boundaryTolerance = 1.0
+    static let fuzzyMatchThreshold = 0.6
+    static let fuzzyMinimumTokens = 3
+
+    static func matchScore(_ quote: DigestKeyQuote, block: VideoSubtitleCue) -> Double? {
+        let parts = block.text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let source = parts.first ?? ""
+        let translation = parts.dropFirst().joined(separator: " ")
+        let whole = DigestQuoteNormalize.apply(block.text)
+        let quoteText = DigestQuoteNormalize.apply(quote.quote)
+        let quoteTranslation = DigestQuoteNormalize.apply(quote.translation)
+        if !quoteText.isEmpty, whole.contains(quoteText) { return 1.0 }
+        if !quoteTranslation.isEmpty, whole.contains(quoteTranslation) { return 1.0 }
+        let sourceText = DigestQuoteNormalize.apply(source)
+        let translationText = DigestQuoteNormalize.apply(translation)
+        if sourceText.count >= 12, quoteText.contains(sourceText) { return 0.9 }
+        if translationText.count >= 6, quoteTranslation.contains(translationText) { return 0.9 }
+        var ratio = 0.0
+        if DigestQuoteNormalize.tokens(quote.quote).count >= fuzzyMinimumTokens {
+            ratio = max(ratio, DigestQuoteNormalize.overlapRatio(of: quote.quote, in: source))
+        }
+        if DigestQuoteNormalize.tokens(quote.translation).count >= fuzzyMinimumTokens {
+            ratio = max(ratio, DigestQuoteNormalize.overlapRatio(of: quote.translation, in: translation))
+        }
+        return ratio >= fuzzyMatchThreshold ? ratio * 0.8 : nil
     }
 
     private static func quoteFromCue(

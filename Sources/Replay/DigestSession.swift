@@ -462,8 +462,11 @@ final class DigestSession: ObservableObject {
         }
         guard self.itemID != nil, self.folder != nil else { return }
 
-        let resolvedDuration = DigestOverviewPrompt.resolvedDuration(itemDuration: duration, cues: cues)
-        let transcript = DigestOverviewPrompt.timestampedTranscript(from: cues)
+        // 金句以整句为单位：转写与回查都用句块，不用 ASR 原始碎片，否则原文译文按碎片错位、整句金句对不上。
+        let aggregated = SubtitleSentenceBlocks.aggregate(cues)
+        let blocks = aggregated.isEmpty ? cues : aggregated
+        let resolvedDuration = DigestOverviewPrompt.resolvedDuration(itemDuration: duration, cues: blocks)
+        let transcript = DigestOverviewPrompt.timestampedTranscript(from: blocks)
         let skeletonBlock = DigestTOCComposer.skeletonBlock(from: chapters)
         let system = DigestOverviewPrompt.systemPrompt(
             duration: resolvedDuration,
@@ -500,7 +503,7 @@ final class DigestSession: ObservableObject {
                         skeleton: chapters,
                         ai: parsed,
                         duration: resolvedDuration,
-                        cues: cues
+                        cues: blocks
                     )
                     guard !payload.chapters.isEmpty else { continue }
                     accepted = payload

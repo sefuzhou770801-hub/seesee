@@ -278,6 +278,7 @@ enum DigestOverviewPrompt {
         - Speech tics and false starts
         - Repeated words from stuttering
         Keep the speaker's voice and word choices intact in "quote". Put the Simplified Chinese translation in "translation".
+        - 每条金句必须完整照抄 transcript 里的一整行（一行就是一句）：不要拼接两行，不要只截半句，translation 也对应那一整句。
 
         CRITICAL: TIMESTAMP EXTRACTION
         The transcript is formatted EXACTLY like this:
@@ -378,7 +379,8 @@ enum DigestOverviewCodec {
 
 enum DigestOverviewStore {
     static let sidecarSuffix = "digest.json"
-    static let currentSchemaVersion = 3
+    /// 4：金句改按句块回查（原文译文整句配对），旧目录作废重生成。
+    static let currentSchemaVersion = 4
     static let language = "zh-Hans"
 
     static func fileURL(itemID: UUID, in folder: URL) -> URL {
