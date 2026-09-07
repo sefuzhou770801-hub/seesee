@@ -180,6 +180,13 @@ struct VideoSubtitleTrack: Equatable, Sendable {
         cue(at: time)?.text
     }
 
+    func cues(around time: Double, window: Double) -> [VideoSubtitleCue] {
+        guard time.isFinite, window.isFinite, window >= 0 else { return [] }
+        let start = time - window
+        let end = time + window
+        return cues.filter { $0.endTime >= start && $0.startTime <= end }
+    }
+
     /// 短于该时长且紧邻后续更长 cue 的条目视为 YouTube 滚动字幕闪现帧，从列表中折叠。
     private static let rollingFlashDurationThreshold: Double = 0.05
     /// 闪现 cue 结束与下一条开始之间允许的空隙（含时间戳四舍五入误差）。

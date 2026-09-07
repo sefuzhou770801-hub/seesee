@@ -54,5 +54,13 @@ struct ReplayApp: App {
                 Button("打开下载文件夹") { store.revealMediaFolder() }
             }
         }
+
+        // 应用菜单「设置…」（⌘,）：AI 密钥在这里填，侧栏无密钥提示也从这里打开。
+        Settings {
+            DigestSettingsView(mediaFolder: store.mediaFolder)
+                .preferredColorScheme(.dark)
+                .tint(OpenMyChrome.ink)
+        }
+        .windowResizability(.contentSize)
     }
 }

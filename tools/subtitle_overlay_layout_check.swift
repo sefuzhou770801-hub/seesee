@@ -103,6 +103,24 @@ struct SubtitleOverlayLayoutCheck {
         precondition(longFullscreen.lines[1].fontSize == 40)
         precondition(!longFullscreen.lines[0].isTruncated)
 
+        let floatingSurface: CGFloat = 420
+        let floatingLong = SubtitleOverlayLayout.resolve(
+            lines: [
+                "I've heard this before and I want the whole sentence visible.",
+                "我听过这句话，希望整句都完整显示在小窗里。"
+            ],
+            surfaceWidth: floatingSurface
+        )
+        precondition(
+            floatingLong.overlayWidth <= floatingSurface,
+            "小窗字幕浮层必须落入 \(floatingSurface)，实际 \(floatingLong.overlayWidth)"
+        )
+        precondition(
+            floatingLong.lines.allSatisfy { $0.fontSize <= 16 },
+            "小窗基准字号必须按 420 宽取 16，实际 \(floatingLong.lines.map(\.fontSize))"
+        )
+        precondition(floatingLong.lines.allSatisfy { !$0.isTruncated })
+
         let hiddenInset = SubtitleOverlayLayout.overlayBottomInset(controlsVisible: false)
         let visibleInset = SubtitleOverlayLayout.overlayBottomInset(controlsVisible: true)
         precondition(hiddenInset == 16)

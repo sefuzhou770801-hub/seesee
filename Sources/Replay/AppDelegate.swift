@@ -48,53 +48,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let window = PlaybackKeyboardRouting.window(for: event)
-            let decision = PlaybackKeyboardRouting.action(
-                in: window,
+            let dispatched = ReplayKeyDispatch.decide(
+                isEditingText: PlaybackKeyboardRouting.isEditingText(in: window),
+                bookAvailable: DigestCommandCenter.shared.bookAvailable,
+                hasActivePlayer: PlaybackCommandCenter.shared.hasActivePlayer,
+                askQuestionEnabled: WatchQAAvailability.isEnabled(),
                 keyCode: event.keyCode,
                 character: event.charactersIgnoringModifiers,
-                modifiers: event.modifierFlags,
-                hasActivePlayer: PlaybackCommandCenter.shared.hasActivePlayer
+                modifiers: event.modifierFlags
             )
 
-            switch decision {
-            case .passThrough:
-                return event
-            case .insertLiteralSpace:
-                // 无修饰空格才会到这里。SwiftUI 字段编辑器会把普通空格交给播放按钮，
-                // 必须写入 U+0020 并消费。带修饰键的空格走 passThrough，留给系统。
-                if PlaybackKeyboardRouting.insertPlainText(" ", in: window) {
+            switch dispatched {
+            case .digest(let action):
+                switch action {
+                case .moveFocus:
+                    return DigestCommandCenter.shared.perform(action) ? nil : event
+                default:
+                    if event.isARepeat { return nil }
+                    return DigestCommandCenter.shared.perform(action) ? nil : event
+                }
+            case .playback(let decision):
+                switch decision {
+                case .passThrough:
+                    return event
+                case .insertLiteralSpace:
+                    // 无修饰空格才会到这里。SwiftUI 字段编辑器会把普通空格交给播放按钮，
+                    // 必须写入 U+0020 并消费。带修饰键的空格走 passThrough，留给系统。
+                    if PlaybackKeyboardRouting.insertPlainText(" ", in: window) {
+                        return nil
+                    }
+                    return event
+                case .resignTextFocus:
+                    PlaybackWindowFocusController.resign(in: event.window, reason: .escape)
+                    return nil
+                case .togglePlayback:
+                    if !event.isARepeat {
+                        PlaybackCommandCenter.shared.togglePlayback()
+                    }
+                    return nil
+                case .toggleFullscreen:
+                    if !event.isARepeat {
+                        PlaybackCommandCenter.shared.toggleFullscreen()
+                    }
+                    return nil
+                case .askQuestion:
+                    if !event.isARepeat {
+                        return PlaybackCommandCenter.shared.askQuestion() ? nil : event
+                    }
+                    return nil
+                case .exitFullscreen:
+                    if PlaybackCommandCenter.shared.dismissAskOverlay() {
+                        return nil
+                    }
+                    return PlaybackCommandCenter.shared.exitFullscreen() ? nil : event
+                case .skip(let seconds):
+                    return PlaybackCommandCenter.shared.skip(by: seconds) ? nil : event
+                case .adjustRate(let delta):
+                    return PlaybackCommandCenter.shared.adjustPlaybackRate(by: delta) ? nil : event
+                case .pasteURL:
+                    let pasteboard = NSPasteboard.general
+                    let urlType = NSPasteboard.PasteboardType("public.url")
+                    guard let value = pasteboard.string(forType: .string)
+                            ?? pasteboard.string(forType: urlType) else {
+                        NSSound.beep()
+                        return nil
+                    }
+                    self?.inbox.receiveClipboard(value)
                     return nil
                 }
-                return event
-            case .resignTextFocus:
-                PlaybackWindowFocusController.resign(in: event.window, reason: .escape)
-                return nil
-            case .togglePlayback:
-                if !event.isARepeat {
-                    PlaybackCommandCenter.shared.togglePlayback()
-                }
-                return nil
-            case .toggleFullscreen:
-                if !event.isARepeat {
-                    PlaybackCommandCenter.shared.toggleFullscreen()
-                }
-                return nil
-            case .exitFullscreen:
-                return PlaybackCommandCenter.shared.exitFullscreen() ? nil : event
-            case .skip(let seconds):
-                return PlaybackCommandCenter.shared.skip(by: seconds) ? nil : event
-            case .adjustRate(let delta):
-                return PlaybackCommandCenter.shared.adjustPlaybackRate(by: delta) ? nil : event
-            case .pasteURL:
-                let pasteboard = NSPasteboard.general
-                let urlType = NSPasteboard.PasteboardType("public.url")
-                guard let value = pasteboard.string(forType: .string)
-                        ?? pasteboard.string(forType: urlType) else {
-                    NSSound.beep()
-                    return nil
-                }
-                self?.inbox.receiveClipboard(value)
-                return nil
             }
         }
     }

@@ -98,6 +98,79 @@ struct PlaybackCommandCheck {
         floatingPlayerView.setSubtitlePresentation(nil, animated: false)
         precondition(floatingPlayerView.displayedSubtitleText == nil)
 
+        let longFloatingCue = VideoSubtitleCue(
+            startTime: 0,
+            endTime: 2,
+            text: "I've heard this before and I want the whole sentence visible.\n我听过这句话，希望整句都完整显示在小窗里。"
+        )
+        let longFloatingSubtitle = VideoSubtitlePresentation.resolve(
+            track: VideoSubtitleTrack(cues: [longFloatingCue]),
+            isEnabled: true,
+            at: 1
+        )
+        let compactFloatingView = FloatingVideoPlayerView()
+        let floatingHost = NSWindow(
+            contentRect: NSRect(origin: .zero, size: FloatingPlayerLayout.size),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        floatingHost.contentView = compactFloatingView
+        compactFloatingView.setSubtitlePresentation(longFloatingSubtitle, animated: false)
+        let expectedFloatingFont = SubtitleOverlayLayout.baseFontSize(
+            forSurfaceWidth: FloatingPlayerLayout.size.width
+        )
+        let floatingFields = subtitleTextFields(in: compactFloatingView)
+        precondition(!floatingFields.isEmpty, "小窗必须画出字幕文字")
+        for field in floatingFields {
+            precondition(
+                (field.font?.pointSize ?? 0) <= expectedFloatingFont + 0.5,
+                "小窗字幕不得按主窗口字号排布，期望 ≤\(expectedFloatingFont)，实际 \(field.font?.pointSize ?? 0) 文案 \(field.stringValue)"
+            )
+        }
+        compactFloatingView.layoutSubtreeIfNeeded()
+        let laidOutFields = subtitleTextFields(in: compactFloatingView)
+        for field in laidOutFields {
+            precondition(
+                (field.font?.pointSize ?? 0) <= expectedFloatingFont + 0.5,
+                "layout 后小窗字幕仍超宽字号，期望 ≤\(expectedFloatingFont)，实际 \(field.font?.pointSize ?? 0)"
+            )
+            let frameInPlayer = field.convert(field.bounds, to: compactFloatingView)
+            precondition(
+                frameInPlayer.maxX <= compactFloatingView.bounds.width + 0.5,
+                "字幕右缘超出小窗，frame=\(frameInPlayer) 窗宽=\(compactFloatingView.bounds.width)"
+            )
+            precondition(
+                frameInPlayer.minX >= -0.5,
+                "字幕左缘超出小窗，frame=\(frameInPlayer)"
+            )
+        }
+        floatingHost.close()
+        let overlayWidth = SubtitleOverlayLayout.resolve(
+            lines: compactFloatingView.displayedSubtitleLines,
+            surfaceWidth: FloatingPlayerLayout.size.width
+        ).overlayWidth
+        precondition(
+            overlayWidth <= FloatingPlayerLayout.size.width,
+            "小窗字幕浮层宽度必须落入窗内，实际 \(overlayWidth)"
+        )
+
+        let restoredMainView = PictureInPicturePlayerView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 450)
+        )
+        restoredMainView.setSubtitlePresentation(longFloatingSubtitle, animated: false)
+        restoredMainView.layoutSubtreeIfNeeded()
+        let mainFields = subtitleTextFields(in: restoredMainView)
+        let expectedMainFont = SubtitleOverlayLayout.baseFontSize(forSurfaceWidth: 800)
+        precondition(!mainFields.isEmpty)
+        for field in mainFields {
+            precondition(
+                abs((field.font?.pointSize ?? 0) - expectedMainFont) < 0.5
+                    || (field.font?.pointSize ?? 0) < expectedMainFont,
+                "回到主窗口后字幕应恢复窗口字号，期望 \(expectedMainFont)，实际 \(field.font?.pointSize ?? 0)"
+            )
+        }
+
         precondition(PlaybackRatePolicy.adjusted(1, by: -0.1) == 1)
         precondition(PlaybackRatePolicy.adjusted(1, by: 0.1) == 1.1)
         precondition(PlaybackRatePolicy.adjusted(2.4, by: 0.1) == 2.5)
@@ -231,6 +304,26 @@ struct PlaybackCommandCheck {
         let floatingFrame = FloatingPlayerLayout.frame(in: screenFrame)
         precondition(floatingFrame.maxX == screenFrame.maxX - FloatingPlayerLayout.margin)
         precondition(floatingFrame.minY == screenFrame.minY + FloatingPlayerLayout.margin)
+        precondition(floatingFrame.size == FloatingPlayerLayout.size)
+
+        let panelProbe = makeFloatingPanel(in: screenFrame)
+        panelProbe.layoutIfNeeded()
+        panelProbe.contentView?.layoutSubtreeIfNeeded()
+        let contentSize = panelProbe.contentView?.bounds.size ?? .zero
+        precondition(
+            abs(contentSize.width - FloatingPlayerLayout.size.width) < 1
+                && abs(contentSize.height - FloatingPlayerLayout.size.height) < 1,
+            "悬浮窗内容区必须是完整 \(FloatingPlayerLayout.size)，实际 \(contentSize) 窗口 \(panelProbe.frame.size)"
+        )
+        precondition(
+            panelProbe.frame.maxX <= screenFrame.maxX,
+            "悬浮窗右缘不得超出可见区域，frame=\(panelProbe.frame) 可见=\(screenFrame)"
+        )
+        precondition(
+            panelProbe.frame.minY >= screenFrame.minY,
+            "悬浮窗底缘不得超出可见区域，frame=\(panelProbe.frame) 可见=\(screenFrame)"
+        )
+        panelProbe.close()
 
         let nowPlayingSnapshot = PlaybackSnapshot(
             currentTime: 42,
@@ -271,6 +364,8 @@ struct PlaybackCommandCheck {
         var selectedRates: [Double] = []
         var fullscreenToggleCount = 0
         var fullscreenExitCount = 0
+        var askQuestionCount = 0
+        var dismissAskCount = 0
         let routePlayer = AVPlayer()
         let token = PlaybackCommandCenter.shared.register(
             player: routePlayer,
@@ -287,8 +382,16 @@ struct PlaybackCommandCheck {
             exitFullscreen: {
                 fullscreenExitCount += 1
                 return true
+            },
+            askQuestion: {
+                askQuestionCount += 1
+                return true
             }
         )
+        PlaybackCommandCenter.shared.setAskOverlayDismissHandler {
+            dismissAskCount += 1
+            return true
+        }
         precondition(PlaybackCommandCenter.shared.hasActivePlayer)
         precondition(PlaybackCommandCenter.shared.isActive(token))
         precondition(PlaybackCommandCenter.shared.activeRoutePlayer === routePlayer)
@@ -304,6 +407,8 @@ struct PlaybackCommandCheck {
         precondition(PlaybackCommandCenter.shared.setPlaybackRate(to: 99))
         precondition(PlaybackCommandCenter.shared.toggleFullscreen())
         precondition(PlaybackCommandCenter.shared.exitFullscreen())
+        precondition(PlaybackCommandCenter.shared.askQuestion())
+        precondition(PlaybackCommandCenter.shared.dismissAskOverlay())
         precondition(received == [-10, 10])
         precondition(toggleCount == 1)
         precondition(requestedPlayingStates == [true, false])
@@ -312,7 +417,10 @@ struct PlaybackCommandCheck {
         precondition(selectedRates == [1.7, 2.5])
         precondition(fullscreenToggleCount == 1)
         precondition(fullscreenExitCount == 1)
+        precondition(askQuestionCount == 1)
+        precondition(dismissAskCount == 1)
         PlaybackCommandCenter.shared.unregister(token)
+        PlaybackCommandCenter.shared.setAskOverlayDismissHandler(nil)
         precondition(!PlaybackCommandCenter.shared.hasActivePlayer)
         precondition(!PlaybackCommandCenter.shared.isActive(token))
         precondition(PlaybackCommandCenter.shared.activeRoutePlayer == nil)
@@ -325,6 +433,48 @@ struct PlaybackCommandCheck {
         precondition(!PlaybackCommandCenter.shared.setPlaybackRate(to: 1.5))
         precondition(!PlaybackCommandCenter.shared.toggleFullscreen())
         precondition(!PlaybackCommandCenter.shared.exitFullscreen())
+        precondition(!PlaybackCommandCenter.shared.askQuestion())
+        precondition(!PlaybackCommandCenter.shared.dismissAskOverlay())
         print("playback_command_check=passed")
+    }
+
+    private static func subtitleTextFields(in view: NSView) -> [NSTextField] {
+        var fields: [NSTextField] = []
+        if let field = view as? NSTextField,
+           !field.isHidden,
+           !field.stringValue.isEmpty {
+            fields.append(field)
+        }
+        for child in view.subviews {
+            fields.append(contentsOf: subtitleTextFields(in: child))
+        }
+        return fields
+    }
+
+    private static func makeFloatingPanel(in visibleFrame: NSRect) -> NSPanel {
+        let floatingView = FloatingVideoPlayerView()
+        floatingView.controlsStyle = .floating
+        floatingView.videoGravity = .resizeAspect
+        floatingView.wantsLayer = true
+        floatingView.layer?.cornerRadius = 16
+        floatingView.layer?.masksToBounds = true
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: FloatingPlayerLayout.size),
+            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.contentAspectRatio = NSSize(width: 16, height: 9)
+        panel.minSize = NSSize(width: 280, height: 157.5)
+        panel.contentView = floatingView
+        panel.setFrame(FloatingPlayerLayout.frame(in: visibleFrame), display: false)
+        return panel
     }
 }

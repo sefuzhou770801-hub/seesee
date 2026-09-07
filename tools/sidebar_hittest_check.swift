@@ -56,29 +56,33 @@ struct SidebarHitTestCheck {
     }
 
     private static func assertLayoutPolicy() {
-        // 添加栏 46 + 分隔线 1 = 47。顶垫 8 点属于第 1 行宽容命中。queue-top 不吃行距。
-        precondition(SidebarQueueLayout.addBarHeight == 46)
+        // 左右栏顶栏必须同高，分隔线才能落在同一水平线上。右栏标题行是 56。
+        precondition(
+            SidebarQueueLayout.addBarHeight == 56,
+            "左栏添加栏必须与右栏 56 点标题行同高，实际 \(SidebarQueueLayout.addBarHeight)"
+        )
         precondition(SidebarQueueLayout.listTopPadding == 8)
         precondition(SidebarQueueLayout.rowSpacing == 4)
-        precondition(SidebarQueueLayout.addBarBottomY == 47)
-        precondition(SidebarQueueLayout.listOriginY == 55)
+        precondition(SidebarQueueLayout.dividerHeight == 1)
+        precondition(SidebarQueueLayout.addBarBottomY == 57)
+        precondition(SidebarQueueLayout.listOriginY == 65)
         precondition(SidebarQueueLayout.queueTopAnchorID == "queue-top")
         precondition(
             SidebarQueueLayout.rowIndex(atWindowY: 20, rowHeight: 70, rowCount: 9) == nil,
             "点在添加栏内不得选中队列行"
         )
-        for y: CGFloat in [40, 44, 46] {
+        for y: CGFloat in [40, 44, 46, 54, 56] {
             precondition(
                 SidebarQueueLayout.rowIndex(atWindowY: y, rowHeight: 70, rowCount: 9) == nil,
                 "添加栏 y=\(y) 不得选中队列行"
             )
         }
         precondition(
-            SidebarQueueLayout.rowIndex(atWindowY: 48, rowHeight: 70, rowCount: 9) == 0,
+            SidebarQueueLayout.rowIndex(atWindowY: 58, rowHeight: 70, rowCount: 9) == 0,
             "添加栏下沿起的顶垫应命中第 1 行"
         )
         precondition(
-            SidebarQueueLayout.rowIndex(atWindowY: 50, rowHeight: 70, rowCount: 9) == 0,
+            SidebarQueueLayout.rowIndex(atWindowY: 60, rowHeight: 70, rowCount: 9) == 0,
             "8 点顶垫属于第 1 行宽容命中"
         )
         precondition(
@@ -159,15 +163,15 @@ struct SidebarHitTestCheck {
         click(window, topY: 20)
         precondition(log.selected.isEmpty, "点添加栏不得选中队列行，实际 \(log.selected)")
 
-        for y: CGFloat in [40, 44, 46] {
+        for y: CGFloat in [40, 44, 46, 54, 56] {
             log.selected.removeAll()
             click(window, topY: y)
             precondition(log.selected.isEmpty, "添加栏 y=\(y) 不得选中队列行，实际 \(log.selected)")
         }
 
         log.selected.removeAll()
-        click(window, topY: 48)
-        precondition(log.selected == [0], "y=48 起应选中第 1 行，实际 \(log.selected)")
+        click(window, topY: 58)
+        precondition(log.selected == [0], "y=58 起应选中第 1 行，实际 \(log.selected)")
 
         log.selected.removeAll()
         click(window, topY: 90)

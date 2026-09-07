@@ -3,7 +3,7 @@ import SwiftUI
 
 /// 侧栏队列的几何约定：添加栏占标题栏区域，列表从栏下开始，不再叠加系统标题栏内边距。
 enum SidebarQueueLayout {
-    static let addBarHeight: CGFloat = 46
+    static let addBarHeight: CGFloat = OpenMyChrome.paneHeaderHeight
     static let dividerHeight: CGFloat = 1
     static let listTopPadding: CGFloat = 8
     static let listBottomPadding: CGFloat = 12

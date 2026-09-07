@@ -117,6 +117,20 @@ final class QueueStore: ObservableObject {
         save()
         selection = queueItems.first?.id ?? archivedItems.first?.id
 
+        wireMonitors()
+    }
+
+    /// 测试用最小注入初始化：直接指定数据文件与媒体目录，跳过目录迁移与监控接线，
+    /// 便于在隔离目录里通过真实 `remove()` 验证删除接线。生产一律走无参 `init()`。
+    init(dataFile: URL, mediaFolder: URL) {
+        self.dataFile = dataFile
+        self.persistenceWriter = QueuePersistenceWriter(dataFile: dataFile)
+        self.mediaFolder = mediaFolder
+        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        load()
+    }
+
+    private func wireMonitors() {
         networkMonitor.onBecameOnline = { [weak self] in
             self?.resumeWaitingDownloads()
         }
@@ -187,7 +201,7 @@ final class QueueStore: ObservableObject {
         lastIntakeError = nil
 
         if addedCount > 0 {
-            let duplicateDetail = existingCount > 0 ? " · \(existingCount) 个已在片库中" : ""
+            let duplicateDetail = existingCount > 0 ? " · \(existingCount) 个已在待播清单中" : ""
             let detail: String
             let systemImage: String
             if powerMonitor.isLowPowerModeEnabled {
@@ -208,7 +222,7 @@ final class QueueStore: ObservableObject {
         } else {
             showIntakeNotice(
                 title: "已在队列中",
-                detail: "粘贴的 \(existingCount) 个链接都已在片库中",
+                detail: "粘贴的 \(existingCount) 个链接都已在待播清单中",
                 systemImage: "checkmark.circle.fill"
             )
         }
@@ -487,20 +501,30 @@ final class QueueStore: ObservableObject {
         cancelRecovery(for: id)
         downloader.cancel(itemID: id)
         if deleteMedia {
-            let prefix = id.uuidString + "."
-            let files = (try? FileManager.default.contentsOfDirectory(
-                at: mediaFolder,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )) ?? []
-            for file in files where file.lastPathComponent.hasPrefix(prefix) {
-                try? FileManager.default.removeItem(at: file)
-            }
+            deleteLocalFiles(for: id)
         }
         items.removeAll { $0.id == id }
         save()
         if selection == id {
             selection = queueItems.first?.id ?? archivedItems.first?.id
+        }
+    }
+
+    /// 删除该视频的全部本地文件（视频、字幕、缩略图、qa sidecar、批注 sidecar、目录 sidecar）。删除协调分两手：
+    /// (1) 串行 actor 打进程内删除标记并删 qa.json，丢弃流式完成的在途/后续追加，防止复活成孤儿；
+    /// (2) 同步前缀扫描立即删除全部 <uuid>.* 文件（含 qa.json），保证进程即使随后退出也不留孤儿。
+    /// 两者对 qa.json 是幂等重复删除；标记保证追加不会在删除之后再复活文件。
+    private func deleteLocalFiles(for id: UUID) {
+        let folder = mediaFolder
+        Task { await WatchQAStore.shared.deleteSidecar(WatchQASidecar(itemID: id, folder: folder)) }
+        let prefix = id.uuidString + "."
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for file in files where file.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: file)
         }
     }
 
