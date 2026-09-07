@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 private final class QueuePersistenceWriter {
@@ -63,7 +64,10 @@ final class QueueStore: ObservableObject {
     @Published var selection: UUID?
     @Published var lastIntakeError: String?
     @Published private(set) var intakeNotice: IntakeNotice?
+    @Published var pendingSubscriptionURL: URL?
 
+    let channelWatch: ChannelWatchStore
+    private var watchCancellables = Set<AnyCancellable>()
     private let downloader = DownloadEngine()
     private let networkMonitor = NetworkMonitor()
     private let powerMonitor = PowerModeMonitor()
@@ -97,6 +101,10 @@ final class QueueStore: ObservableObject {
         dataFile = applicationSupport.appendingPathComponent("queue.json")
         persistenceWriter = QueuePersistenceWriter(dataFile: dataFile)
         mediaFolder = migration.mediaFolder
+        channelWatch = ChannelWatchStore(
+            dataFile: applicationSupport.appendingPathComponent("subscriptions.json"),
+            downloader: downloader
+        )
         try? fileManager.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
         load()
@@ -126,13 +134,34 @@ final class QueueStore: ObservableObject {
         self.dataFile = dataFile
         self.persistenceWriter = QueuePersistenceWriter(dataFile: dataFile)
         self.mediaFolder = mediaFolder
+        self.channelWatch = ChannelWatchStore(
+            dataFile: dataFile.deletingLastPathComponent().appendingPathComponent("subscriptions.json"),
+            downloader: downloader
+        )
         try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
         load()
     }
 
     private func wireMonitors() {
+        channelWatch.isOnline = { [weak self] in self?.networkMonitor.isOnline ?? false }
+        channelWatch.existingURLStrings = { [weak self] in Set(self?.items.map(\.urlString) ?? []) }
+        channelWatch.enqueue = { [weak self] url in
+            self?.add(url, showsNotice: false, activatesApp: false, selectsItem: false)
+        }
+        channelWatch.onPollFinished = { [weak self] count in
+            guard let self, count > 0 else { return }
+            self.showIntakeNotice(
+                title: "订阅有更新",
+                detail: count == 1 ? "已加入 1 个新视频" : "已加入 \(count) 个新视频",
+                systemImage: "dot.radiowaves.up.forward"
+            )
+        }
+        channelWatch.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &watchCancellables)
         networkMonitor.onBecameOnline = { [weak self] in
             self?.resumeWaitingDownloads()
+            self?.channelWatch.pollAll()
         }
         networkMonitor.start()
         powerMonitor.onChange = { [weak self] enabled in
@@ -153,6 +182,7 @@ final class QueueStore: ObservableObject {
             missingChapterMetadata.forEach { self?.refreshChapterMetadata(for: $0) }
             missingThumbnails.forEach { self?.refreshThumbnail(for: $0) }
             missingSubtitles.forEach { self?.refreshSubtitle(for: $0) }
+            self?.channelWatch.start()
         }
     }
 
@@ -176,7 +206,7 @@ final class QueueStore: ObservableObject {
             lastIntakeError = "拖入的内容里没有网页链接。"
             return
         }
-        add(webURL)
+        consider(webURL)
     }
 
     func accept(rawValue: String) {
@@ -186,13 +216,18 @@ final class QueueStore: ObservableObject {
             return
         }
         guard urls.count > 1 else {
-            add(urls[0])
+            consider(urls[0])
             return
         }
 
         var addedCount = 0
         var existingCount = 0
+        var subscribedCount = 0
         for url in urls {
+            if ChannelLink.isSubscription(url) {
+                if channelWatch.add(url) { subscribedCount += 1 }
+                continue
+            }
             switch add(url, showsNotice: false, activatesApp: false) {
             case .added: addedCount += 1
             case .existing: existingCount += 1
@@ -201,7 +236,11 @@ final class QueueStore: ObservableObject {
         lastIntakeError = nil
 
         if addedCount > 0 {
-            let duplicateDetail = existingCount > 0 ? " · \(existingCount) 个已在待播清单中" : ""
+            let extra = [
+                existingCount > 0 ? "\(existingCount) 个已在待播清单中" : nil,
+                subscribedCount > 0 ? "\(subscribedCount) 个频道已订阅" : nil
+            ].compactMap { $0 }.joined(separator: " · ")
+            let duplicateDetail = extra.isEmpty ? "" : " · \(extra)"
             let detail: String
             let systemImage: String
             if powerMonitor.isLowPowerModeEnabled {
@@ -219,6 +258,12 @@ final class QueueStore: ObservableObject {
                 detail: detail,
                 systemImage: systemImage
             )
+        } else if subscribedCount > 0 {
+            showIntakeNotice(
+                title: subscribedCount == 1 ? "已加入订阅" : "已加入 \(subscribedCount) 个订阅",
+                detail: "有新视频会自动入队",
+                systemImage: "dot.radiowaves.up.forward"
+            )
         } else {
             showIntakeNotice(
                 title: "已在队列中",
@@ -229,15 +274,61 @@ final class QueueStore: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func confirmPendingSubscription() {
+        guard let url = pendingSubscriptionURL else { return }
+        pendingSubscriptionURL = nil
+        if channelWatch.add(url) {
+            showIntakeNotice(
+                title: "已加入订阅",
+                detail: "有新视频会自动入队 · \(ChannelLink.displayTitle(for: url))",
+                systemImage: "dot.radiowaves.up.forward"
+            )
+        } else {
+            showIntakeNotice(
+                title: "已在订阅中",
+                detail: ChannelLink.displayTitle(for: url),
+                systemImage: "checkmark.circle.fill"
+            )
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func cancelPendingSubscription() {
+        pendingSubscriptionURL = nil
+    }
+
+    func removeSubscription(_ id: UUID) {
+        channelWatch.remove(id)
+    }
+
+    private func consider(_ url: URL) {
+        if ChannelLink.isSubscription(url) {
+            lastIntakeError = nil
+            if channelWatch.contains(url) {
+                showIntakeNotice(
+                    title: "已在订阅中",
+                    detail: ChannelLink.displayTitle(for: url),
+                    systemImage: "checkmark.circle.fill"
+                )
+                NSApp.activate(ignoringOtherApps: true)
+                return
+            }
+            pendingSubscriptionURL = url
+            return
+        }
+        add(url)
+    }
+
     @discardableResult
     private func add(
         _ url: URL,
         showsNotice: Bool = true,
-        activatesApp: Bool = true
+        activatesApp: Bool = true,
+        selectsItem: Bool = true
     ) -> AddDisposition {
         let canonical = URLIntake.canonicalString(for: url)
         if let existing = items.first(where: { $0.urlString == canonical }) {
-            selection = existing.id
+            if selectsItem { selection = existing.id }
             if existing.state == .failed || existing.state == .queued { startDownload(for: existing.id) }
             if showsNotice {
                 let detail = existing.state == .failed || existing.state == .queued
@@ -273,7 +364,7 @@ final class QueueStore: ObservableObject {
             subtitleFilePath: nil
         )
         items.insert(item, at: 0)
-        selection = item.id
+        if selectsItem { selection = item.id }
         lastIntakeError = nil
         save()
         startDownload(for: item.id)

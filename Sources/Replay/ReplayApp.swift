@@ -50,8 +50,15 @@ struct ReplayApp: App {
         .defaultSize(width: 1320, height: 820)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(after: .sidebar) {
+                Button("显示或隐藏左侧栏") {
+                    NotificationCenter.default.post(name: .replaySidebarToggle, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+            }
             CommandGroup(after: .appInfo) {
                 Button("打开下载文件夹") { store.revealMediaFolder() }
+                Button("检查订阅更新") { store.channelWatch.pollAll() }
             }
         }
 

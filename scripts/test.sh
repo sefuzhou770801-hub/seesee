@@ -26,6 +26,13 @@ compile_and_run url_intake \
     "$project_dir/Sources/Replay/URLIntake.swift" \
     "$project_dir/tools/url_intake_check.swift"
 
+compile_and_run channel_watch \
+    "$project_dir/Sources/Replay/URLIntake.swift" \
+    "$project_dir/Sources/Replay/ChannelLink.swift" \
+    "$project_dir/Sources/Replay/PlaylistListing.swift" \
+    "$project_dir/Sources/Replay/ChannelSubscription.swift" \
+    "$project_dir/tools/channel_watch_check.swift"
+
 compile_and_run retry_policy \
     "$project_dir/Sources/Replay/DownloadRetryPolicy.swift" \
     "$project_dir/tools/retry_policy_check.swift"
@@ -456,7 +463,11 @@ compile_and_run qa_remove \
     "$project_dir/Sources/Replay/QueueRowMeta.swift" \
     "$project_dir/Sources/Replay/URLIntake.swift" \
     "$project_dir/Sources/Replay/DownloadRetryPolicy.swift" \
+    "$project_dir/Sources/Replay/ChannelLink.swift" \
+    "$project_dir/Sources/Replay/PlaylistListing.swift" \
+    "$project_dir/Sources/Replay/ChannelSubscription.swift" \
     "$project_dir/Sources/Replay/DownloadEngine.swift" \
+    "$project_dir/Sources/Replay/ChannelWatchStore.swift" \
     "$project_dir/Sources/Replay/WatchQAStore.swift" \
     "$project_dir/Sources/Replay/DigestAnnotations.swift" \
     "$project_dir/Sources/Replay/QueueStore.swift" \

@@ -32,6 +32,9 @@ struct SidebarSlideoutCheck {
 
     @MainActor
     static func main() {
+        // 本检查以进程名为偏好域：清掉上一轮留下的栏位状态，保证每次从同一初始态开始。
+        UserDefaults.standard.removePersistentDomain(forName: ProcessInfo.processInfo.processName)
+        setvbuf(stdout, nil, _IONBF, 0)
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.accessory)
         OpenMyChrome.applyAppearance()
@@ -121,6 +124,10 @@ struct SidebarSlideoutCheck {
         }
 
         pinNarrowWindow(window)
+        // 窄窗自动收起左栏经 onChange 与动画完成，机器忙时不止 1.2 秒：等到收起为止，最多 8 秒。
+        for _ in 0..<160 where measure(window, host: host, tMS: -1).sidebarFrame.width >= 40 {
+            pump(window, host, times: 1)
+        }
         let collapsed = measure(window, host: host, tMS: -1)
         print("collapsed window=\(fmt(collapsed.windowFrame)) content=\(fmt(collapsed.contentFrame)) sidebar=\(fmt(collapsed.sidebarFrame)) detail=\(fmt(collapsed.detailFrame)) fitting=\(fmt(collapsed.fittingSize))")
         precondition(
@@ -208,7 +215,9 @@ struct SidebarSlideoutCheck {
     private static func pinNarrowWindow(_ window: NSWindow) {
         window.setContentSize(NSSize(width: windowWidth, height: windowHeight))
         var frame = window.frame
-        frame.origin = NSPoint(x: -4800, y: -4800)
+        // 放在主屏可见区内（alpha 为 0 看不见）：完全离屏的窗口不会布局与动画，收起动作永远不完成。
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        frame.origin = NSPoint(x: visible.minX, y: visible.minY)
         window.setFrame(frame, display: true, animate: false)
     }
 
@@ -227,13 +236,47 @@ struct SidebarSlideoutCheck {
         let matches: (CGFloat) -> Bool = { width in
             shouldExpand ? width >= 40 : width < 40
         }
-        if clickSidebarToggle(in: window) {
+        // 先走与菜单「显示或隐藏左侧栏」相同的通知（确定性），点击工具栏按钮只作后备。
+        NotificationCenter.default.post(name: .replaySidebarToggle, object: nil, userInfo: ["collapsed": !shouldExpand])
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.08))
+        if matches(measure(window, host: host, tMS: 0).sidebarFrame.width) { return }
+        let clicked = clickSidebarToggle(in: window)
+        if clicked {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.08))
             if matches(measure(window, host: host, tMS: 0).sidebarFrame.width) { return }
         }
-        _ = NSApp.sendAction(NSSelectorFromString("toggleSidebar:"), to: nil, from: window)
+        // 点击没落到工具栏按钮时（进程不活跃、窗口不是 key），直接对分栏控制器做与按钮相同的动作。
+        var sent = NSApp.sendAction(NSSelectorFromString("toggleSidebar:"), to: nil, from: window)
+        if !sent, let split = window.contentViewController.flatMap(splitViewController(in:)) {
+            split.toggleSidebar(nil)
+            sent = true
+        }
+        if !sent, let toolbar = window.toolbar {
+            // 直接触发工具栏里「隐藏边栏」项的动作，与用户点击等价。
+            for item in toolbar.items {
+                let identifier = item.itemIdentifier.rawValue.lowercased()
+                guard identifier.contains("togglesidebar") else { continue }
+                if let action = item.action, NSApp.sendAction(action, to: item.target, from: item) {
+                    sent = true
+                    break
+                }
+                if let view = item.view, let control = firstControl(in: view) {
+                    control.performClick(nil)
+                    sent = true
+                    break
+                }
+                if let view = item.view {
+                    print("toggleSidebar 项视图层级: \(describe(view))")
+                }
+            }
+            if !sent {
+                print("toolbar items: \(toolbar.items.map { $0.itemIdentifier.rawValue })")
+            }
+        }
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.08))
-        if matches(measure(window, host: host, tMS: 0).sidebarFrame.width) { return }
+        let width = measure(window, host: host, tMS: 0).sidebarFrame.width
+        print("toggleLeadingSidebar clicked=\(clicked) sent=\(sent) width=\(width)")
+        if matches(width) { return }
     }
 
     private static func disarmClickShield(in view: NSView) {
@@ -324,6 +367,27 @@ struct SidebarSlideoutCheck {
         window.sendEvent(event(.leftMouseDown))
         window.sendEvent(event(.leftMouseUp))
         return true
+    }
+
+    private static func firstControl(in view: NSView) -> NSControl? {
+        if let control = view as? NSControl { return control }
+        for child in view.subviews {
+            if let found = firstControl(in: child) { return found }
+        }
+        return nil
+    }
+
+    private static func describe(_ view: NSView, depth: Int = 0) -> String {
+        let line = String(repeating: " ", count: depth) + view.className
+        return ([line] + view.subviews.map { describe($0, depth: depth + 1) }).joined(separator: "\n")
+    }
+
+    private static func splitViewController(in controller: NSViewController) -> NSSplitViewController? {
+        if let split = controller as? NSSplitViewController { return split }
+        for child in controller.children {
+            if let found = splitViewController(in: child) { return found }
+        }
+        return nil
     }
 
     private static func sidebarToggleHostingView(in view: NSView) -> NSView? {

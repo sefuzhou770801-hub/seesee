@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var urlBarFrame: CGRect = .zero
     @State private var pendingRenameID: UUID?
     @AppStorage("sidebarWatchedCollapsed") private var watchedCollapsed = false
+    @AppStorage("sidebarSubscriptionsCollapsed") private var subscriptionsCollapsed = false
     @FocusState private var isURLFieldFocused: Bool
 
     var body: some View {
@@ -34,6 +35,18 @@ struct ContentView: View {
                 )
         }
         .navigationSplitViewStyle(.balanced)
+        .onReceive(NotificationCenter.default.publisher(for: .replaySidebarToggle)) { notification in
+            // 菜单「显示或隐藏左侧栏」（⌃⌘S）与离屏检查共用：带 collapsed 就设成指定态，否则切换。
+            let target: NavigationSplitViewVisibility
+            if let collapsed = notification.userInfo?["collapsed"] as? Bool {
+                target = collapsed ? .detailOnly : .all
+            } else {
+                target = columnVisibility == .detailOnly ? .all : .detailOnly
+            }
+            withAnimation(.easeInOut(duration: 0.22)) {
+                columnVisibility = target
+            }
+        }
         // 窗口最小尺寸只写在 NSWindow.minSize。若给 SplitView 设死 minWidth，
         // 侧栏滑出时 fittingSize 会变成窗口宽加栏宽，内容按比例撑出窗口。
         .coordinateSpace(name: "replay-window")
@@ -108,6 +121,20 @@ struct ContentView: View {
             }
             Button("取消", role: .cancel) { itemToDelete = nil }
         }
+        .confirmationDialog(
+            "加入订阅？",
+            isPresented: Binding(
+                get: { store.pendingSubscriptionURL != nil },
+                set: { if !$0 { store.cancelPendingSubscription() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("加入订阅") { store.confirmPendingSubscription() }
+            Button("取消", role: .cancel) { store.cancelPendingSubscription() }
+        } message: {
+            let name = store.pendingSubscriptionURL.map(ChannelLink.displayTitle(for:)) ?? "这个频道"
+            Text("\(name) 是频道或播放列表。加入后，有新视频会自动入队下载。")
+        }
     }
 
     private var sidebar: some View {
@@ -131,8 +158,9 @@ struct ContentView: View {
     private var queueList: some View {
         let queueItems = store.queueItems
         let archivedItems = store.archivedItems
+        let subscriptions = store.channelWatch.subscriptions
 
-        if queueItems.isEmpty && archivedItems.isEmpty {
+        if queueItems.isEmpty && archivedItems.isEmpty && subscriptions.isEmpty {
             SidebarEmptyState()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -187,6 +215,31 @@ struct ContentView: View {
                                         }
                                     }
                                     .padding(.top, queueItems.isEmpty ? 0 : 10)
+                                }
+                            }
+
+                            if !subscriptions.isEmpty {
+                                Section {
+                                    if !subscriptionsCollapsed {
+                                        ForEach(subscriptions) { subscription in
+                                            SubscriptionRow(
+                                                subscription: subscription,
+                                                onDelete: { store.removeSubscription(subscription.id) }
+                                            )
+                                        }
+                                    }
+                                } header: {
+                                    SidebarSectionHeader(
+                                        title: "订阅",
+                                        count: subscriptions.count,
+                                        systemImage: "dot.radiowaves.up.forward",
+                                        isCollapsed: subscriptionsCollapsed
+                                    ) {
+                                        withAnimation(.easeOut(duration: 0.15)) {
+                                            subscriptionsCollapsed.toggle()
+                                        }
+                                    }
+                                    .padding(.top, queueItems.isEmpty && archivedItems.isEmpty ? 0 : 10)
                                 }
                             }
                         }
@@ -780,6 +833,37 @@ private struct SidebarEmptyState: View {
     }
 }
 
+private struct SubscriptionRow: View {
+    let subscription: ChannelSubscription
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "dot.radiowaves.up.forward")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(OpenMyChrome.muted)
+                .frame(width: 18)
+            Text(subscription.title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(OpenMyChrome.ink)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button(action: onDelete) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(OpenMyChrome.faint)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("取消订阅")
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct SidebarSectionHeader: View {
     let title: String
     let count: Int
@@ -814,7 +898,7 @@ private struct SidebarSectionHeader: View {
         }
         .buttonStyle(.plain)
         .disabled(onToggle == nil)
-        .help(onToggle == nil ? "" : (isCollapsed ? "展开已看" : "收起已看"))
+        .help(onToggle == nil ? "" : (isCollapsed ? "展开\(title)" : "收起\(title)"))
     }
 }
 
@@ -3091,4 +3175,9 @@ private struct EmptyLibraryView: View {
         }
         .onDrop(of: [UTType.url, UTType.fileURL, UTType.plainText], isTargeted: $isDropTarget, perform: receiveProviders)
     }
+}
+
+extension Notification.Name {
+    /// 左侧栏显隐：userInfo["collapsed"] 为 Bool 时设成指定态，缺省时切换。
+    static let replaySidebarToggle = Notification.Name("ReplaySidebarToggle")
 }

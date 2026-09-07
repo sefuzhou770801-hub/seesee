@@ -325,6 +325,58 @@ final class DownloadEngine {
         }
     }
 
+    func fetchFlatPlaylist(
+        sourceURL: URL,
+        limit: Int,
+        completion: @escaping (Swift.Result<[PlaylistListing.Entry], Error>) -> Void
+    ) {
+        metadataQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let ytDlp = try self.requiredTool(named: "yt-dlp")
+                let process = Process()
+                let output = Pipe()
+                let errorOutput = Pipe()
+                process.executableURL = ytDlp
+                process.standardOutput = output
+                process.standardError = errorOutput
+                process.environment = self.processEnvironment()
+                var arguments = [
+                    "--ignore-config",
+                    "--flat-playlist",
+                    "--skip-download",
+                    "--no-color",
+                    "--playlist-end", "\(limit)",
+                    "--print", "%(id)s|%(title)s|%(webpage_url)s"
+                ]
+                if ChannelLink.usesPlaylistOrder(sourceURL) {
+                    arguments.append("--playlist-reverse")
+                }
+                if let deno = self.findTool(named: "deno") {
+                    arguments += ["--js-runtimes", "deno:\(deno.path)"]
+                }
+                arguments.append(sourceURL.absoluteString)
+                process.arguments = arguments
+
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                guard process.terminationStatus == 0 else {
+                    let message = String(decoding: errorData, as: UTF8.self)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    throw EngineError.failed(
+                        message.isEmpty ? "无法读取这个频道的视频列表。" : message
+                    )
+                }
+                let text = String(decoding: data, as: UTF8.self)
+                completion(.success(PlaylistListing.parse(text, sourceURL: sourceURL)))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
     private func parse(
         line: String,
         metadata: inout Metadata,
