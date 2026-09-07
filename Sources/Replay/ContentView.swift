@@ -1688,12 +1688,7 @@ private struct PlaybackControls: View {
             )
 
             if showsSponsorSkipToggle {
-                PlayerControlButton(
-                    systemImage: skipSponsorsEnabled ? "forward.end.fill" : "forward.end",
-                    help: skipSponsorsEnabled ? "正在跳过赞助段，点击关闭" : "自动跳过赞助段，点击打开",
-                    isSelected: skipSponsorsEnabled,
-                    action: toggleSponsorSkip
-                )
+                SponsorSkipPill(isOn: skipSponsorsEnabled, action: toggleSponsorSkip)
             }
 
             PlayerControlButton(
@@ -1832,6 +1827,39 @@ private struct PlaybackSpeedMenu: View {
 
     private func rateLabel(_ rate: Double) -> String {
         String(format: "%.1f×", rate)
+    }
+}
+
+/// 跳赞助段开关：文字胶囊，与倍速胶囊同款；图标版会被当成「下一章」。
+private struct SponsorSkipPill: View {
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("跳赞助")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.primary.opacity(isOn ? 1 : 0.45))
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background {
+                    if isOn {
+                        Capsule().fill(Color.primary.opacity(0.08))
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .watchGlass(.clear, interactive: true, in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(Color.primary.opacity(0.07))
+        }
+        .fixedSize()
+        .help(isOn ? "正在自动跳过赞助段，点击关闭" : "已关闭自动跳过赞助段，点击打开")
+        .accessibilityLabel("跳过赞助段")
+        .accessibilityValue(isOn ? "开" : "关")
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 }
 
