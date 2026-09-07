@@ -135,7 +135,7 @@ struct DigestOverviewCheck {
         precondition(loaded?.payload.keyQuotes[0].translation == "你好")
         precondition(loaded?.model == "claude-sonnet-5")
         precondition(loaded?.language == "zh-Hans")
-        precondition(loaded?.schemaVersion == 3)
+        precondition(loaded?.schemaVersion == 4)
         precondition(loaded?.generatedAt.timeIntervalSince1970 == 1_700_000_000)
 
         let stale = DigestOverviewRecord(

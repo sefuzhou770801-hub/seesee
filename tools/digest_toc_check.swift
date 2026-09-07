@@ -10,6 +10,7 @@ struct DigestTOCCheck {
         checkMergeExtraAIChapters()
         checkQuoteSnapsToCueAndDropsInvented()
         checkAtMostOneQuotePerChapter()
+        checkQuoteMatchesSentenceBlocks()
         try checkCacheVersionInvalidation()
         print("digest_toc_check=passed")
     }
@@ -364,9 +365,111 @@ struct DigestTOCCheck {
         precondition(toc.chapters[0].quote?.quote == "first line")
     }
 
+    /// 金句按句块回查：整句配对原文译文、跨块取时间码最近的一块、去掉语气词后仍能模糊命中。
+    private static func checkQuoteMatchesSentenceBlocks() {
+        let raw = [
+            VideoSubtitleCue(startTime: 0.5, endTime: 2.26, text: "One of the most common questions my students\n我的学生问我最常见的问题之一"),
+            VideoSubtitleCue(startTime: 2.28, endTime: 3.58, text: "at Stanford ask me is\n在斯坦福大学问我的是"),
+            VideoSubtitleCue(startTime: 3.72, endTime: 4.92, text: "I'm stuck in a rut\n我陷入困境了"),
+            VideoSubtitleCue(startTime: 5.02, endTime: 6.02, text: "what do I do?\n我该怎么办？"),
+            VideoSubtitleCue(startTime: 6.18, endTime: 8.52, text: "My answer is, it's likely due to one of four things.\n我的回答是，这很可能与四件事中的一件有关。"),
+            VideoSubtitleCue(startTime: 9.0, endTime: 11.0, text: "All right, so here we are, in front of the\n好了，我们现在"),
+            VideoSubtitleCue(startTime: 11.0, endTime: 12.5, text: "elephants.\n在大象前面。"),
+            VideoSubtitleCue(startTime: 20.0, endTime: 24.0, text: "So, um, you know, the key is to, like, keep shipping every single week.\n所以，呃，你知道，关键是，就像，每周都要持续交付。")
+        ]
+        let blocks = SubtitleSentenceBlocks.aggregate(raw)
+        precondition(blocks.count == 4, "夹具应聚成 4 个句块，实际 \(blocks.count)")
+        let skeleton = [VideoChapter(title: "章", startTime: 0, endTime: 60)]
+        func compose(_ quote: DigestKeyQuote) -> DigestKeyQuote? {
+            let ai = DigestOverviewPayload(
+                chapters: [DigestGeneratedChapter(title: "章", timestamp: "0:00", timestampSeconds: 0, summary: "概括", quote: quote)],
+                keyQuotes: []
+            )
+            return DigestTOCComposer.compose(skeleton: skeleton, ai: ai, duration: 60, cues: blocks).chapters[0].quote
+        }
+
+        // 整句金句跨四条 ASR 碎片：按碎片对不上，按句块整句命中，原文译文都是整句。
+        let sentence = compose(DigestKeyQuote(
+            quote: "One of the most common questions my students at Stanford ask me is: I'm stuck in a rut, what do I do?",
+            translation: "我的学生问我最常见的问题之一是：我陷入困境了，该怎么办？",
+            timestamp: "0:00",
+            timestampSeconds: 0
+        ))
+        precondition(sentence != nil, "整句金句必须命中句块")
+        precondition(sentence?.timestampSeconds == 0.5)
+        precondition(sentence?.quote == "One of the most common questions my students at Stanford ask me is I'm stuck in a rut what do I do?")
+        precondition(sentence?.translation == "我的学生问我最常见的问题之一在斯坦福大学问我的是我陷入困境了我该怎么办？")
+
+        // #39 现象：原文取到半句、译文配成「大象」。改后原文译文各是完整一句。
+        let elephants = compose(DigestKeyQuote(
+            quote: "All right, so here we are, in front of the elephants",
+            translation: "好了，我们现在在大象前面",
+            timestamp: "0:09",
+            timestampSeconds: 9
+        ))
+        precondition(elephants?.quote == "All right, so here we are, in front of the elephants.")
+        precondition(elephants?.translation == "好了，我们现在在大象前面。")
+        precondition(elephants?.timestampSeconds == 9.0)
+
+        // 模型去掉了语气词：整句包含失败，词元重合命中。
+        let cleaned = compose(DigestKeyQuote(
+            quote: "The key is to keep shipping every single week.",
+            translation: "关键是每周都要持续交付。",
+            timestamp: "0:20",
+            timestampSeconds: 20
+        ))
+        precondition(cleaned?.timestampSeconds == 20.0, "去语气词的金句应模糊命中")
+        precondition(cleaned?.quote.hasPrefix("So, um, you know") == true, "命中后取句块原文")
+
+        // 金句拼接了两句：两块都落在金句里，取时间码最近的一块。
+        let spanning = compose(DigestKeyQuote(
+            quote: "I'm stuck in a rut, what do I do? My answer is, it's likely due to one of four things.",
+            translation: "",
+            timestamp: "0:06",
+            timestampSeconds: 6.18
+        ))
+        precondition(spanning?.timestampSeconds == 6.18, "跨块金句取时间码最近的句块，实际 \(String(describing: spanning?.timestampSeconds))")
+
+        // 章节起点按整秒显示值给（0:41），句块实际起点 40.6：边界放宽后仍归该章。
+        let boundaryCues = [
+            VideoSubtitleCue(startTime: 12.945, endTime: 26.9, text: "We find when that circuitry is not working you get apathy.\n我们发现回路不起作用时你会冷漠。"),
+            VideoSubtitleCue(startTime: 27.8, endTime: 40.5, text: "So of course this is overly simplistic.\n所以当然这过于简化了。"),
+            VideoSubtitleCue(startTime: 40.597, endTime: 48.0, text: "In graduating the level of motivation we have to seek particular outcomes.\n在调节我们动力水平方面以寻求特定结果。")
+        ]
+        let boundaryAI = DigestOverviewPayload(
+            chapters: [
+                DigestGeneratedChapter(title: "一", timestamp: "0:00", timestampSeconds: 0, summary: "一"),
+                DigestGeneratedChapter(
+                    title: "二", timestamp: "0:13", timestampSeconds: 13, summary: "二",
+                    quote: DigestKeyQuote(quote: "We find when that circuitry is not working you get apathy.", translation: "", timestamp: "0:13", timestampSeconds: 13)
+                ),
+                DigestGeneratedChapter(
+                    title: "三", timestamp: "0:41", timestampSeconds: 41, summary: "三",
+                    quote: DigestKeyQuote(quote: "In graduating the level of motivation we have to seek particular outcomes.", translation: "", timestamp: "0:41", timestampSeconds: 41)
+                )
+            ],
+            keyQuotes: [
+                DigestKeyQuote(quote: "So of course this is overly simplistic.", translation: "", timestamp: "0:27", timestampSeconds: 27)
+            ]
+        )
+        let boundary = DigestTOCComposer.compose(skeleton: [], ai: boundaryAI, duration: 60, cues: boundaryCues)
+        precondition(boundary.chapters[1].quote?.timestampSeconds == 12.945, "章起点 0:13 应收下 12.9 秒起的句块")
+        precondition(boundary.chapters[2].quote?.timestampSeconds == 40.597, "章起点 0:41 应收下 40.6 秒起的句块")
+        precondition(boundary.chapters[1].quote?.quote.hasPrefix("We find") == true, "本章自带金句优先于额外金句")
+
+        // 编造的整句：词元重合不足，仍然丢弃。
+        let invented = compose(DigestKeyQuote(
+            quote: "Nothing in this video ever mentioned quantum computing at all",
+            translation: "视频里完全没提量子计算",
+            timestamp: "0:05",
+            timestampSeconds: 5
+        ))
+        precondition(invented == nil, "编造金句必须丢弃")
+    }
+
     /// 探索分支 schema 2 缓存必须作废；当前版本可读写。
     private static func checkCacheVersionInvalidation() throws {
-        precondition(DigestOverviewStore.currentSchemaVersion == 3, "合成目录须递增缓存版本，作废探索分支旧总览")
+        precondition(DigestOverviewStore.currentSchemaVersion == 4, "金句改按句块回查须递增缓存版本，作废旧目录")
 
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("digest-toc-\(UUID().uuidString)", isDirectory: true)
@@ -392,6 +495,14 @@ struct DigestTOCCheck {
             DigestOverviewStore.load(itemID: staleID, folder: folder) == nil,
             "schema 2 必须视为过期"
         )
+        let staleQuoteID = UUID()
+        var staleQuotes = stale
+        staleQuotes.schemaVersion = 3
+        try DigestOverviewStore.save(staleQuotes, itemID: staleQuoteID, folder: folder)
+        precondition(
+            DigestOverviewStore.load(itemID: staleQuoteID, folder: folder) == nil,
+            "schema 3（按碎片配金句）必须视为过期"
+        )
 
         let freshID = UUID()
         let composed = DigestTOCComposer.compose(
@@ -412,7 +523,7 @@ struct DigestTOCCheck {
         )
         try DigestOverviewStore.save(fresh, itemID: freshID, folder: folder)
         let loaded = DigestOverviewStore.load(itemID: freshID, folder: folder)
-        precondition(loaded?.schemaVersion == 3)
+        precondition(loaded?.schemaVersion == 4)
         precondition(loaded?.payload.chapters.count == 1)
         precondition(loaded?.payload.chapters[0].title == "开场")
         precondition(loaded?.payload.chapters[0].summary == "介绍")

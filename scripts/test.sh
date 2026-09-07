@@ -242,6 +242,7 @@ compile_and_run digest_overview \
 compile_and_run digest_toc \
     "$project_dir/Sources/Replay/WatchItem.swift" \
     "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
     "$project_dir/Sources/Replay/DigestCopy.swift" \
     "$project_dir/Sources/Replay/DigestOverview.swift" \
     "$project_dir/Sources/Replay/DigestTOC.swift" \
@@ -278,6 +279,7 @@ compile_and_run digest_session \
     "$project_dir/Sources/Replay/WatchItem.swift" \
     "$project_dir/Sources/Replay/ChapterMetadata.swift" \
     "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
     "$project_dir/Sources/Replay/WatchQAContext.swift" \
     "$project_dir/Sources/Replay/DigestCopy.swift" \
     "$project_dir/Sources/Replay/DigestOverview.swift" \
