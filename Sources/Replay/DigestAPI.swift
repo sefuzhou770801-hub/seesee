@@ -77,6 +77,9 @@ enum DigestExplainPrompt {
 
 struct DigestClientError: LocalizedError {
     let message: String
+    /// HTTP 状态码与响应片段：设置页据此区分密钥无效、额度用尽还是服务故障。
+    var status: Int? = nil
+    var body: String? = nil
     var errorDescription: String? { message }
 }
 
@@ -347,12 +350,22 @@ enum DigestAPIClient {
     ) async throws -> String {
         let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DigestClientError(message: DigestRequestBuilder.errorMessage(status: http.statusCode, data: data))
+            throw DigestClientError(
+                message: DigestRequestBuilder.errorMessage(status: http.statusCode, data: data),
+                status: http.statusCode,
+                body: String(decoding: data.prefix(600), as: UTF8.self)
+            )
         }
         guard let text = extract(data),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
-            throw DigestClientError(message: DigestCopy.writeFailed)
+            // 请求已被服务接受（2xx）只是没回出文字：带上状态码，设置页验证密钥时据此判定密钥可用。
+            let status = (response as? HTTPURLResponse)?.statusCode
+            throw DigestClientError(
+                message: DigestCopy.writeFailed,
+                status: status,
+                body: String(decoding: data.prefix(600), as: UTF8.self)
+            )
         }
         return text
     }

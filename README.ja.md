@@ -70,7 +70,7 @@ Apple Silicon（M シリーズ）専用、macOS 13 以降が必要です。yt-dl
 
 ## AI キーの設定
 
-「解説」と「目次」は言語モデルを呼び出すため API キーが必要です。メニューバーの **seesee › 設定…**（⌘,）を開き、サービスを選んでキーを貼り付けてください。キーはこの Mac にだけ保存され、字幕の抜粋が送られるのは解説や目次を求めたときだけです。
+「解説」と「目次」は言語モデルを呼び出すため API キーが必要です。タイトルバー右端の歯車（またはメニューバーの **seesee › 設定…**、⌘,）を開き、サービスを選んでキーを貼り付けてください。貼り付けると自動で検証されます。キーはこの Mac にだけ保存され、字幕の抜粋が送られるのは解説や目次を求めたときだけです。
 
 - Gemini：[Google AI Studio](https://aistudio.google.com/apikey) で無料取得、カード登録不要（推奨）。
 - Anthropic：[Anthropic Console](https://console.anthropic.com/settings/keys) で取得、従量課金。

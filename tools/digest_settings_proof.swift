@@ -4,10 +4,11 @@ import SwiftUI
 @main
 struct DigestSettingsProof {
     static let emptyPath = "/tmp/digest-settings-empty.png"
-    static let filledPath = "/tmp/digest-settings-filled.png"
+    static let validPath = "/tmp/digest-settings-valid.png"
+    static let invalidPath = "/tmp/digest-settings-invalid.png"
 
     @MainActor
-    static func main() {
+    static func main() async {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.accessory)
         OpenMyChrome.applyAppearance()
@@ -15,13 +16,24 @@ struct DigestSettingsProof {
         let suite = "digest-settings-proof-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
+        let media = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Replay")
 
-        let empty = DigestSettingsModel(defaults: defaults, environment: [:])
+        let empty = DigestSettingsModel(defaults: defaults, environment: [:], mediaFolder: media, verifier: { _, _ in .valid })
         render(model: empty, path: emptyPath)
 
-        let filled = DigestSettingsModel(defaults: defaults, environment: [:])
-        filled.key = "AIzaSyD-example-example-example-example"
-        render(model: filled, path: filledPath)
+        let valid = DigestSettingsModel(defaults: defaults, environment: [:], mediaFolder: media, verifier: { _, _ in .valid })
+        valid.debounce = 0
+        valid.key = "AIzaSyD-example-example-example-example"
+        await valid.awaitVerification()
+        precondition(valid.status == DigestSettingsCopy.validStatus)
+        render(model: valid, path: validPath)
+
+        let invalid = DigestSettingsModel(defaults: defaults, environment: [:], mediaFolder: media, verifier: { _, _ in .invalid })
+        invalid.debounce = 0
+        invalid.key = "AIzaSyD-wrong-wrong-wrong-wrong-wrong"
+        await invalid.awaitVerification()
+        precondition(invalid.status == DigestSettingsCopy.invalidStatus)
+        render(model: invalid, path: invalidPath)
         print("digest_settings_proof=passed")
     }
 
@@ -69,8 +81,8 @@ struct DigestSettingsProof {
         } catch {
             fatalError("digest_settings_proof: 写 \(path) 失败 \(error)")
         }
-        precondition(height <= 320, "设置页高度 \(height) 超出预期")
-        print("digest_settings_proof size=\(Int(width))x\(Int(height)) status=\(model.status) png=\(path)")
+        precondition(height <= 420, "设置页高度 \(height) 超出预期")
+        print("digest_settings_proof size=\(Int(width))x\(Int(height)) status=\(model.status) masked=\(model.maskedKey) png=\(path)")
         window.close()
     }
 }

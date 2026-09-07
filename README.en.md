@@ -70,7 +70,7 @@ Videos download in the background and are stored locally for offline playback. Y
 
 ## AI key
 
-Explain and Table of Contents call a language model, so they need an API key. Open **seesee › Settings…** (⌘,), pick a provider and paste the key. It stays on this Mac, and subtitle excerpts are sent only when you ask for an explanation or a table of contents.
+Explain and Table of Contents call a language model, so they need an API key. Click the gear at the right end of the title bar (or **seesee › Settings…**, ⌘,), pick a provider and paste the key; it is verified automatically. It stays on this Mac, and subtitle excerpts are sent only when you ask for an explanation or a table of contents.
 
 - Gemini: free key from [Google AI Studio](https://aistudio.google.com/apikey), no card required (recommended).
 - Anthropic: key from the [Anthropic Console](https://console.anthropic.com/settings/keys), pay as you go.
