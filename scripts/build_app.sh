@@ -11,6 +11,9 @@ bundled_tools_dir="${REPLAY_BUNDLED_TOOLS_DIR:-}"
 install_app="${REPLAY_INSTALL_APP:-1}"
 launch_app="${REPLAY_LAUNCH_APP:-$install_app}"
 installed_app="${REPLAY_INSTALLED_APP_PATH:-/Applications/seesee.app}"
+# "-" keeps the local ad-hoc signature; a "Developer ID Application: ..." identity
+# produces a hardened-runtime, timestamped signature suitable for notarization.
+signing_identity="${REPLAY_SIGNING_IDENTITY:--}"
 
 # The macOS 27 Command Line Tools SDK currently omits SwiftUI macro plugins.
 # Prefer the adjacent macOS 26 compatibility SDK only for that toolchain.
@@ -70,7 +73,31 @@ if [[ -n "$bundled_tools_dir" ]]; then
     fi
 fi
 
-codesign --force --deep --sign - "$app_dir"
+if [[ "$signing_identity" == "-" ]]; then
+    codesign --force --deep --sign - "$app_dir"
+else
+    signing_args=(
+        --force
+        --sign "$signing_identity"
+        --options runtime
+        --timestamp
+    )
+
+    # Sign nested executables explicitly from the inside out; --deep is not
+    # used for Developer ID signing because it can silently replace nested
+    # signatures. Deno ships with its own Developer ID signature and
+    # hardened-runtime entitlements, so that signature is kept intact.
+    if [[ -d "$resources_dir/Tools" ]]; then
+        codesign "${signing_args[@]}" \
+            --entitlements "$project_dir/Resources/yt-dlp.entitlements" \
+            "$resources_dir/Tools/yt-dlp"
+        codesign "${signing_args[@]}" "$resources_dir/Tools/ffmpeg"
+        codesign --verify --strict "$resources_dir/Tools/deno"
+    fi
+    codesign "${signing_args[@]}" "$macos_dir/Replay"
+    codesign "${signing_args[@]}" "$app_dir"
+fi
+codesign --verify --deep --strict "$app_dir"
 
 launch_target="$app_dir"
 if [[ "$install_app" == "1" ]]; then

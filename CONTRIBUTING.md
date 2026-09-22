@@ -29,4 +29,13 @@ brew install yt-dlp ffmpeg deno
 
 ## Releases
 
-The version comes from `Resources/Info.plist`. To publish a release, update both bundle version fields and push a matching `v*` tag. GitHub Actions builds the universal, self-contained app and attaches `Replay-macOS.zip` plus its SHA-256 checksum to the release.
+The version comes from `Resources/Info.plist`. To publish a release, update both bundle version fields, then build a signed and notarized archive locally:
+
+```bash
+REPLAY_SIGNING_IDENTITY="Developer ID Application: YIQI XIE (ANVS3UQK9W)" \
+REPLAY_NOTARIZE=1 REPLAY_NOTARY_PROFILE=openmy-notary \
+REPLAY_UNIVERSAL=0 REPLAY_BUNDLED_TOOLS_DIR=.build/runtime-tools/arm64 \
+    ./scripts/package_release.sh
+```
+
+The script signs every bundled executable with the hardened runtime and a secure timestamp (Deno keeps its own Developer ID signature), submits the app for notarization, staples the ticket, and writes `dist/release-v<version>/seesee-v<version>-apple-silicon.zip` plus its SHA-256 checksum. Push a matching `v*` tag and attach both files to the GitHub release. Never publish an archive whose notarization was not accepted.
