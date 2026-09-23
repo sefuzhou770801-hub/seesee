@@ -174,6 +174,30 @@ struct SubtitlePresentationCheck {
             VideoSubtitlePresentation.resolve(track: chineseSource, mode: .translationOnly, at: 1)?.text == "而是一套能理解代码库",
             "原文与译文相同时仅译文档仍应显示译文"
         )
+        // 折叠后只剩一行：含汉字则视为译文并显示（中文原声单行、YouTube .zh-hans）；纯外文原文轨仍不显示。
+        let singleChinese = VideoSubtitleTrack(cues: [
+            VideoSubtitleCue(startTime: 0, endTime: 2, text: "而是一套能理解代码库")
+        ])
+        precondition(
+            VideoSubtitlePresentation.resolve(track: singleChinese, mode: .translationOnly, at: 1)?.text
+                == "而是一套能理解代码库",
+            "只有一行中文的 cue 在仅译文档应显示原文"
+        )
+        let singleEnglish = VideoSubtitleTrack(cues: [
+            VideoSubtitleCue(startTime: 0, endTime: 2, text: "Hello world")
+        ])
+        precondition(
+            VideoSubtitlePresentation.resolve(track: singleEnglish, mode: .translationOnly, at: 1) == nil,
+            "只有一行英文的 cue 在仅译文档仍应返回 nil"
+        )
+        let englishThenChinese = VideoSubtitleTrack(cues: [
+            VideoSubtitleCue(startTime: 0, endTime: 2, text: "Hello world\n你好世界")
+        ])
+        precondition(
+            VideoSubtitlePresentation.resolve(track: englishThenChinese, mode: .translationOnly, at: 1)?.text
+                == "你好世界",
+            "英文加中文两行的 cue 在仅译文档只显示中文行"
+        )
         precondition(SubtitleDisplayMode.bilingual.next == .translationOnly)
         precondition(SubtitleDisplayMode.translationOnly.next == .off)
         precondition(SubtitleDisplayMode.off.next == .bilingual)

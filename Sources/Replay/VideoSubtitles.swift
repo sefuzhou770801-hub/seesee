@@ -40,29 +40,28 @@ struct VideoSubtitlePresentation: Equatable, Identifiable, Sendable {
         guard mode != .off, let track, time.isFinite else { return nil }
         let cue = track.cue(at: time) ?? holdOverCue(track: track, at: time)
         guard let cue else { return nil }
-        return applying(mode, to: presentation(for: cue), sourceText: cue.text)
+        return applying(mode, to: presentation(for: cue))
     }
 
-    /// 原始文本里的非空行数（不折叠相同行）。
-    private static func rawLineCount(_ text: String) -> Int {
-        text.components(separatedBy: .newlines)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .count
+    /// CJK 统一汉字基本区 U+4E00–U+9FFF 与扩展 A 区 U+3400–U+4DBF。
+    private static func containsHan(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+        }
     }
 
-    /// 仅译文档：丢掉原文行只留译文；没有译文的 cue（纯原文轨）不显示。
-    /// 原文与译文相同（中文原声）时双语档已折叠成一行，这一行就是译文，照常显示。
+    /// 仅译文档：丢掉原文行只留译文；没有译文的 cue（纯外文原文轨）不显示。
+    /// 折叠后只剩一行时，含汉字则视为译文并显示（中文原声、机翻中文轨）。
     private static func applying(
         _ mode: SubtitleDisplayMode,
-        to presentation: VideoSubtitlePresentation,
-        sourceText: String
+        to presentation: VideoSubtitlePresentation
     ) -> VideoSubtitlePresentation? {
         guard mode == .translationOnly else { return presentation }
         let lines = displayLines(from: presentation.text)
-        if lines.count == 1, rawLineCount(sourceText) >= 2 {
-            return presentation
+        if lines.count == 1 {
+            return containsHan(lines[0]) ? presentation : nil
         }
-        guard lines.count >= 2 else { return nil }
         return VideoSubtitlePresentation(
             id: presentation.id,
             text: lines.dropFirst().joined(separator: "\n")
