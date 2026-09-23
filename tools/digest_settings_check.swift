@@ -34,7 +34,7 @@ struct DigestSettingsCheck {
 
     @MainActor
     private static func checkMasking() {
-        precondition(DigestSettingsModel.masked("AIzaSyCIseds1p7m5KScZjGKhMIEAin7G7mQgmg") == "AIza••••••Qgmg", "头四位尾四位中间六点")
+        precondition(DigestSettingsModel.masked("AIza-fake-key-for-mask-Qgmg") == "AIza••••••Qgmg", "头四位尾四位中间六点")
         precondition(DigestSettingsModel.masked("  sk-ant-api03-abcdefgh  ") == "sk-a••••••efgh", "先去首尾空白")
         precondition(DigestSettingsModel.masked("short") == "•••••", "短密钥全遮")
         precondition(DigestSettingsModel.masked("ab") == "••••", "至少四个点")
