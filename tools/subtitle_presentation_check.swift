@@ -162,6 +162,18 @@ struct SubtitlePresentationCheck {
         ])
         precondition(VideoSubtitlePresentation.resolve(track: sourceOnly, mode: .translationOnly, at: 1) == nil)
         precondition(VideoSubtitlePresentation.resolve(track: sourceOnly, mode: .bilingual, at: 1) != nil)
+        // 中文原声视频：生成的字幕原文行与译文行相同。双语档折叠成一行，仅译文档也必须显示这一行，不能整段无字幕。
+        let chineseSource = VideoSubtitleTrack(cues: [
+            VideoSubtitleCue(startTime: 0, endTime: 2, text: "而是一套能理解代码库\n而是一套能理解代码库")
+        ])
+        precondition(
+            VideoSubtitlePresentation.resolve(track: chineseSource, mode: .bilingual, at: 1)?.text == "而是一套能理解代码库",
+            "原文与译文相同时双语档只显示一行"
+        )
+        precondition(
+            VideoSubtitlePresentation.resolve(track: chineseSource, mode: .translationOnly, at: 1)?.text == "而是一套能理解代码库",
+            "原文与译文相同时仅译文档仍应显示译文"
+        )
         precondition(SubtitleDisplayMode.bilingual.next == .translationOnly)
         precondition(SubtitleDisplayMode.translationOnly.next == .off)
         precondition(SubtitleDisplayMode.off.next == .bilingual)
