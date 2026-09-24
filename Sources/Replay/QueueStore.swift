@@ -689,8 +689,9 @@ final class QueueStore: ObservableObject {
             return .failure("正在搬移视频")
         }
         if MediaFolderMoveMarker.exists(beside: dataFile) {
-            mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.incompleteMove)
-            return .failure(MediaFolderCopy.incompleteMove)
+            let reason = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
+            mediaFolderMoveMessage = reason
+            return .failure(reason)
         }
         isMovingMediaFolder = true
         mediaFolderMoveMessage = nil
@@ -719,6 +720,10 @@ final class QueueStore: ObservableObject {
             applyMovedMediaFolder(destination)
             mediaFolderMoveMessage = nil
             MediaFolderLog.info("move succeeded: \(destination.path)")
+        case .finishedWithSourceLeftovers(let note):
+            applyMovedMediaFolder(destination)
+            mediaFolderMoveMessage = note
+            MediaFolderLog.info("move finished with leftover sources: \(note)")
         case .noOp:
             MediaFolderLog.info("move skipped: destination is the current folder")
         case .failure(let reason):
@@ -747,7 +752,7 @@ final class QueueStore: ObservableObject {
 
     private func applyIncompleteMoveBannerIfNeeded() {
         guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
-        mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.incompleteMove)
+        mediaFolderMoveMessage = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
     }
 
     func refreshMediaFolderConnection() {

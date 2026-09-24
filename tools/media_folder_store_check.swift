@@ -11,6 +11,7 @@ struct MediaFolderStoreCheck {
         try await checkDisconnectedSourceMoveIsRejected()
         try await checkDisconnectedDestinationMoveDoesNotCreate()
         try await checkIncompleteMarkerRefusesNewMove()
+        try await checkPartialDeleteDoesNotClaimSourcesRemain()
         try await checkSettingsMirrorSeesFailureAfterChange()
         print("media_folder_store_check=passed")
     }
@@ -215,22 +216,64 @@ struct MediaFolderStoreCheck {
         let store = await MainActor.run {
             QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
         }
+        let expected = MediaFolderCopy.leftoverDestinationNeedsCleanup(
+            URL(fileURLWithPath: "/new", isDirectory: true).standardizedFileURL.path
+        )
         await MainActor.run {
-            precondition(
-                store.mediaFolderMoveMessage == MediaFolderCopy.failure(MediaFolderCopy.incompleteMove),
-                "启动时必须提示上次搬移未完成"
-            )
+            precondition(store.mediaFolderMoveMessage == expected, "启动时必须提示目标可能有残余、需要手动清理")
         }
         let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
         let result = await MainActor.run {
             store.moveMediaFolder(to: dest)
         }
         await MainActor.run {
-            precondition(result == .failure(MediaFolderCopy.incompleteMove), "有标记时拒绝新搬移，实际 \(result)")
-            precondition(store.mediaFolderMoveMessage == MediaFolderCopy.failure(MediaFolderCopy.incompleteMove))
+            precondition(result == .failure(expected), "有标记时拒绝新搬移，实际 \(result)")
+            precondition(store.mediaFolderMoveMessage == expected)
             precondition(FileManager.default.fileExists(atPath: video.path))
             precondition(!FileManager.default.fileExists(atPath: dest.path))
         }
+    }
+
+    /// 审查第 2 轮-2：QueueStore 对部分删除用告知文案，不用「原来的视频都还在」。
+    private static func checkPartialDeleteDoesNotClaimSourcesRemain() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let first = env.mediaFolder.appendingPathComponent("one.mp4")
+        let second = env.mediaFolder.appendingPathComponent("two.mp4")
+        try Data("video-bytes-one".utf8).write(to: first)
+        try Data("video-bytes-two".utf8).write(to: second)
+        try writeQueue([], to: env.dataFile)
+        var sourceDeletes = 0
+        var mover = MediaLibraryMover(defaults: env.defaults)
+        mover.removeItem = { url in
+            if url.path.hasPrefix(env.mediaFolder.path) {
+                sourceDeletes += 1
+                if sourceDeletes == 2 {
+                    throw NSError(
+                        domain: "media-folder-check",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "operation not permitted"]
+                    )
+                }
+            }
+            try FileManager.default.removeItem(at: url)
+        }
+        let injected = mover
+        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
+        let observed = await MainActor.run { () -> (MediaLibraryMoveResult, String?, URL) in
+            let store = QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
+            let result = store.moveMediaFolder(to: dest, mover: injected)
+            return (result, store.mediaFolderMoveMessage, store.mediaFolder)
+        }
+        guard case .finishedWithSourceLeftovers(let note) = observed.0 else {
+            fatalError("部分删除应是搬移已完成，实际 \(observed.0)")
+        }
+        precondition(observed.1 == note)
+        precondition(!note.contains("原来的视频都还在"))
+        precondition(note.contains("搬移已经完成"))
+        precondition(observed.2.standardizedFileURL.path == dest.standardizedFileURL.path)
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == dest.standardizedFileURL.path)
     }
 
     /// 审查 5：设置页订赋值后的发布，看到的失败文案与 store 最终值一致。

@@ -16,6 +16,7 @@ enum MediaFolderLog {
 
 enum MediaLibraryMoveResult: Equatable {
     case success
+    case finishedWithSourceLeftovers(String)
     case noOp
     case failure(String)
 }
@@ -27,6 +28,24 @@ enum MediaFolderMoveMarker {
 
     static func exists(beside dataFile: URL, fileManager: FileManager = .default) -> Bool {
         fileManager.fileExists(atPath: url(beside: dataFile).path)
+    }
+
+    static func destination(beside dataFile: URL, fileManager: FileManager = .default) -> URL? {
+        guard let text = try? String(contentsOf: url(beside: dataFile), encoding: .utf8) else { return nil }
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard line.hasPrefix("to=") else { continue }
+            let path = String(line.dropFirst(3))
+            guard !path.isEmpty else { return nil }
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return nil
+    }
+
+    static func incompleteReason(beside dataFile: URL, fileManager: FileManager = .default) -> String {
+        if let dest = destination(beside: dataFile, fileManager: fileManager) {
+            return MediaFolderCopy.leftoverDestinationNeedsCleanup(dest.standardizedFileURL.path)
+        }
+        return MediaFolderCopy.incompleteMove
     }
 }
 
@@ -51,7 +70,7 @@ struct MediaLibraryMover {
             return .failure(MediaFolderCopy.downloadingBlock)
         }
         if MediaFolderMoveMarker.exists(beside: dataFile, fileManager: fileManager) {
-            return .failure(MediaFolderCopy.incompleteMove)
+            return .failure(MediaFolderMoveMarker.incompleteReason(beside: dataFile, fileManager: fileManager))
         }
         let from = source.standardizedFileURL
         let to = destination.standardizedFileURL
@@ -66,14 +85,18 @@ struct MediaLibraryMover {
         }
 
         do {
-            try performMove(
+            switch try performMove(
                 from: from,
                 to: to,
                 dataFile: dataFile,
                 items: items,
                 onProgress: onProgress
-            )
-            return .success
+            ) {
+            case .done:
+                return .success
+            case .doneWithSourceLeftovers(let note):
+                return .finishedWithSourceLeftovers(note)
+            }
         } catch {
             return .failure(error.localizedDescription)
         }
@@ -85,7 +108,7 @@ struct MediaLibraryMover {
         dataFile: URL,
         items: [WatchItem],
         onProgress: ((MediaLibraryMoveProgress) -> Void)?
-    ) throws {
+    ) throws -> PerformOutcome {
         let marker = MediaFolderMoveMarker.url(beside: dataFile)
         try writeMarker(marker, from: source, to: destination)
         var copied: [URL] = []
@@ -130,8 +153,14 @@ struct MediaLibraryMover {
             MediaFolderPreference.save(destination, defaults: defaults)
             committedMetadata = true
 
-            try deleteVerifiedSources(files)
+            let leftoverNames = deleteVerifiedSources(files)
             try clearMarker(marker)
+            if leftoverNames.isEmpty {
+                return .done
+            }
+            return .doneWithSourceLeftovers(
+                MediaFolderCopy.sourceLeftovers(names: leftoverNames, sourcePath: source.path)
+            )
         } catch {
             if committedMetadata {
                 throw MediaLibraryMoveFailure(
@@ -143,8 +172,19 @@ struct MediaLibraryMover {
                 parts.append(restoreError)
             }
             restorePreference(previousPreference)
-            if let rollbackError = rollback(copied: copied, destination: destination, destinationExisted: destinationExisted) {
+            let rollbackError = rollback(copied: copied, destination: destination, destinationExisted: destinationExisted)
+            if let rollbackError {
                 parts.append(rollbackError)
+            }
+            let destDirty = rollbackError != nil
+                || copied.contains { fileManager.fileExists(atPath: $0.path) }
+            if destDirty {
+                throw MediaLibraryMoveFailure(
+                    MediaFolderCopy.rollbackLeftResidue(
+                        path: destination.path,
+                        reason: parts.joined(separator: "；")
+                    )
+                )
             }
             if let markerError = clearMarkerIfPossible(marker) {
                 parts.append(markerError)
@@ -291,18 +331,16 @@ struct MediaLibraryMover {
         try data.write(to: dataFile, options: .atomic)
     }
 
-    private func deleteVerifiedSources(_ files: [URL]) throws {
-        var failures: [String] = []
+    private func deleteVerifiedSources(_ files: [URL]) -> [String] {
+        var leftovers: [String] = []
         for file in files {
             do {
                 try removeItem(file)
             } catch {
-                failures.append("\(file.lastPathComponent)：\(error.localizedDescription)")
+                leftovers.append(file.lastPathComponent)
             }
         }
-        if !failures.isEmpty {
-            throw MediaLibraryMoveFailure("删除原文件没有完成：\(failures.joined(separator: "；"))")
-        }
+        return leftovers
     }
 
     private func rollback(copied: [URL], destination: URL, destinationExisted: Bool) -> String? {
@@ -365,6 +403,11 @@ struct MediaLibraryMover {
             defaults.removeObject(forKey: MediaFolderPreference.key)
         }
     }
+}
+
+private enum PerformOutcome {
+    case done
+    case doneWithSourceLeftovers(String)
 }
 
 private struct MediaLibraryMoveFailure: LocalizedError {
