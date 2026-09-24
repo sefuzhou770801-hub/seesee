@@ -11,6 +11,13 @@ struct MediaLibraryMoverCheck {
         try checkConflictAborts()
         try checkDownloadBlock()
         try checkSameFolderNoOp()
+        try checkDisconnectedSourceIsNotEmptyLibrary()
+        try checkMissingSourceFails()
+        try checkEnumerationErrorFails()
+        try checkCopyThrowLeavesNoResidueAndCanRetry()
+        try checkDeleteFailureIsNotSuccess()
+        try checkDisconnectedDestinationDoesNotCreate()
+        try checkRollbackReportsDeleteFailure()
         print("media_library_mover_check=passed")
     }
 
@@ -145,6 +152,10 @@ struct MediaLibraryMoverCheck {
         let backupData = try Data(contentsOf: backup)
         precondition(backupData == originalQueue, "备份必须是改写前的内容")
         precondition(env.defaults.string(forKey: MediaFolderPreference.key) == env.destination.standardizedFileURL.path)
+        precondition(
+            !FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path),
+            "成功后必须清掉进行中标记"
+        )
     }
 
     private static func checkCorruptCopyRollsBack() throws {
@@ -251,6 +262,277 @@ struct MediaLibraryMoverCheck {
         precondition(result == .noOp)
         precondition(FileManager.default.fileExists(atPath: video.path))
         precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+    }
+
+    /// 审查 1：未挂载源卷不得当空片库成功搬移。
+    private static func checkDisconnectedSourceIsNotEmptyLibrary() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let fakeVolumes = env.root.appendingPathComponent("Volumes", isDirectory: true)
+        let missing = fakeVolumes.appendingPathComponent("不存在的卷/seesee", isDirectory: true)
+        let originalQueue = try Data(contentsOf: env.dataFile)
+        let mover = MediaLibraryMover(
+            defaults: env.defaults,
+            now: { env.now },
+            mountedVolumes: [URL(fileURLWithPath: "/")],
+            volumesRoot: fakeVolumes
+        )
+        let result = mover.move(
+            from: missing,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        precondition(result == .failure(MediaFolderCopy.sourceDisconnected), "未连接源必须拒绝，实际 \(result)")
+        let leftoverDisconnected = try Data(contentsOf: env.dataFile)
+        precondition(leftoverDisconnected == originalQueue, "未连接时不得改 queue.json")
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+        precondition(!FileManager.default.fileExists(atPath: env.destination.path))
+        precondition(!FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path))
+    }
+
+    /// 审查 1：源目录不存在也不能当空列表成功。
+    private static func checkMissingSourceFails() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let missing = env.root.appendingPathComponent("no-such-library", isDirectory: true)
+        let originalQueue = try Data(contentsOf: env.dataFile)
+        let mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        let result = mover.move(
+            from: missing,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        guard case .failure(let reason) = result else {
+            fatalError("源目录不存在必须失败，实际 \(result)")
+        }
+        precondition(reason.contains("源目录不存在"), "失败原因应说明源不存在，实际 \(reason)")
+        let leftoverMissing = try Data(contentsOf: env.dataFile)
+        precondition(leftoverMissing == originalQueue)
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+        precondition(!FileManager.default.fileExists(atPath: env.destination.path))
+    }
+
+    /// 审查 1：枚举子目录出错必须整次失败，不能只搬走看得见的文件。
+    private static func checkEnumerationErrorFails() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let visible = env.source.appendingPathComponent("visible.mp4")
+        try Data("visible-bytes".utf8).write(to: visible)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: env.source.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: env.source.path)
+        }
+
+        let originalQueue = try Data(contentsOf: env.dataFile)
+        let mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        let result = mover.move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        guard case .failure(let reason) = result else {
+            fatalError("枚举出错必须失败，实际 \(result)")
+        }
+        precondition(reason.contains("枚举"), "失败原因应提到枚举，实际 \(reason)")
+        let leftoverEnum = try Data(contentsOf: env.dataFile)
+        precondition(leftoverEnum == originalQueue)
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+        precondition(!FileManager.default.fileExists(atPath: env.destination.path))
+    }
+
+    /// 审查 2：copyItem 写出目标后抛错，半成品必须清掉，同一目标可以重试。
+    private static func checkCopyThrowLeavesNoResidueAndCanRetry() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let first = env.source.appendingPathComponent("one.mp4")
+        let second = env.source.appendingPathComponent("two.mp4")
+        try Data("video-bytes-one".utf8).write(to: first)
+        try Data("video-bytes-two".utf8).write(to: second)
+        try FileManager.default.createDirectory(at: env.destination, withIntermediateDirectories: true)
+        let originalQueue = try Data(contentsOf: env.dataFile)
+
+        var attempts = 0
+        var mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        mover.copyItem = { from, to in
+            attempts += 1
+            try FileManager.default.copyItem(at: from, to: to)
+            if attempts == 2 {
+                throw NSError(
+                    domain: "media-folder-check",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "disk full"]
+                )
+            }
+        }
+        let failed = mover.move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        guard case .failure(let reason) = failed else {
+            fatalError("复制中途抛错必须失败，实际 \(failed)")
+        }
+        precondition(reason.contains("disk full"), "失败原因应带上复制器错误，实际 \(reason)")
+        precondition(FileManager.default.fileExists(atPath: first.path))
+        precondition(FileManager.default.fileExists(atPath: second.path))
+        let leftoverCopy = try Data(contentsOf: env.dataFile)
+        precondition(leftoverCopy == originalQueue)
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+        precondition(
+            !FileManager.default.fileExists(atPath: env.destination.appendingPathComponent("one.mp4").path),
+            "已复制的第一份也必须回滚"
+        )
+        precondition(
+            !FileManager.default.fileExists(atPath: env.destination.appendingPathComponent("two.mp4").path),
+            "抛错前落地的半成品必须回滚"
+        )
+        precondition(!FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path))
+
+        let retry = MediaLibraryMover(defaults: env.defaults, now: { env.now }).move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        precondition(retry == .success, "清干净后重试同一目标应当成功，实际 \(retry)")
+        precondition(FileManager.default.fileExists(atPath: env.destination.appendingPathComponent("one.mp4").path))
+        precondition(FileManager.default.fileExists(atPath: env.destination.appendingPathComponent("two.mp4").path))
+        precondition(!FileManager.default.fileExists(atPath: first.path))
+        precondition(!FileManager.default.fileExists(atPath: second.path))
+    }
+
+    /// 审查 3：删除源文件失败不得报成功，进行中标记必须留下。
+    private static func checkDeleteFailureIsNotSuccess() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.source.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        var mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        mover.removeItem = { url in
+            if url.path.hasPrefix(env.source.path) {
+                throw NSError(
+                    domain: "media-folder-check",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "operation not permitted"]
+                )
+            }
+            try FileManager.default.removeItem(at: url)
+        }
+        let result = mover.move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        guard case .failure(let reason) = result else {
+            fatalError("删除失败不得报成功，实际 \(result)")
+        }
+        precondition(reason.contains("删除原文件没有完成"), "应报告删除失败，实际 \(reason)")
+        precondition(reason.contains("operation not permitted"))
+        precondition(FileManager.default.fileExists(atPath: video.path), "删除失败时源文件还在")
+        precondition(FileManager.default.fileExists(atPath: env.destination.appendingPathComponent("keep.mp4").path))
+        precondition(
+            FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path),
+            "删除失败必须留下进行中标记"
+        )
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == env.destination.standardizedFileURL.path)
+
+        let blocked = MediaLibraryMover(defaults: env.defaults, now: { env.now }).move(
+            from: env.source,
+            to: env.root.appendingPathComponent("another", isDirectory: true),
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        precondition(blocked == .failure(MediaFolderCopy.incompleteMove), "有标记时拒绝新搬移，实际 \(blocked)")
+    }
+
+    /// 审查 4：目标卷未挂载时不得 createDirectory。
+    private static func checkDisconnectedDestinationDoesNotCreate() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.source.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        let fakeVolumes = env.root.appendingPathComponent("Volumes", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeVolumes, withIntermediateDirectories: true)
+        let dest = fakeVolumes.appendingPathComponent("不存在的卷/seesee", isDirectory: true)
+        let originalQueue = try Data(contentsOf: env.dataFile)
+        let mover = MediaLibraryMover(
+            defaults: env.defaults,
+            now: { env.now },
+            mountedVolumes: [URL(fileURLWithPath: "/")],
+            volumesRoot: fakeVolumes
+        )
+        let result = mover.move(
+            from: env.source,
+            to: dest,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        precondition(result == .failure(MediaFolderCopy.destinationDisconnected), "目标未连接必须拒绝，实际 \(result)")
+        precondition(FileManager.default.fileExists(atPath: video.path))
+        let leftoverDest = try Data(contentsOf: env.dataFile)
+        precondition(leftoverDest == originalQueue)
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+        precondition(!FileManager.default.fileExists(atPath: dest.path), "不得创建目标目录")
+        precondition(
+            !FileManager.default.fileExists(atPath: fakeVolumes.appendingPathComponent("不存在的卷").path),
+            "不得在卷根留下同名空目录"
+        )
+    }
+
+    /// Standards：回滚删除失败必须写进错误，不能 try? 吞掉。
+    private static func checkRollbackReportsDeleteFailure() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.source.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        var mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        mover.copyItem = { from, to in
+            try FileManager.default.copyItem(at: from, to: to)
+            throw NSError(
+                domain: "media-folder-check",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "verify interrupt"]
+            )
+        }
+        mover.removeItem = { url in
+            throw NSError(
+                domain: "media-folder-check",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "cannot unlink leftover"]
+            )
+        }
+        let result = mover.move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        guard case .failure(let reason) = result else {
+            fatalError("回滚删除失败必须反映为失败，实际 \(result)")
+        }
+        precondition(reason.contains("verify interrupt"))
+        precondition(reason.contains("回滚目标文件没有完成"), "应报告回滚失败，实际 \(reason)")
+        precondition(reason.contains("cannot unlink leftover"))
     }
 
     private struct Env {

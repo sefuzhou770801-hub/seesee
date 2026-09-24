@@ -20,11 +20,24 @@ enum MediaLibraryMoveResult: Equatable {
     case failure(String)
 }
 
+enum MediaFolderMoveMarker {
+    static func url(beside dataFile: URL) -> URL {
+        dataFile.deletingLastPathComponent().appendingPathComponent(MediaFolderCopy.inProgressMarkerName)
+    }
+
+    static func exists(beside dataFile: URL, fileManager: FileManager = .default) -> Bool {
+        fileManager.fileExists(atPath: url(beside: dataFile).path)
+    }
+}
+
 struct MediaLibraryMover {
     var fileManager: FileManager = .default
     var copyItem: (URL, URL) throws -> Void = { try FileManager.default.copyItem(at: $0, to: $1) }
+    var removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
     var defaults: UserDefaults = .standard
     var now: () -> Date = Date.init
+    var mountedVolumes: [URL] = MediaFolderAvailability.liveMountedVolumes()
+    var volumesRoot: URL = MediaFolderAvailability.defaultVolumesRoot
 
     func move(
         from source: URL,
@@ -37,10 +50,19 @@ struct MediaLibraryMover {
         if hasActiveDownload {
             return .failure(MediaFolderCopy.downloadingBlock)
         }
+        if MediaFolderMoveMarker.exists(beside: dataFile, fileManager: fileManager) {
+            return .failure(MediaFolderCopy.incompleteMove)
+        }
         let from = source.standardizedFileURL
         let to = destination.standardizedFileURL
         if from.path == to.path {
             return .noOp
+        }
+        if MediaFolderAvailability.isDisconnected(from, mountedVolumes: mountedVolumes, volumesRoot: volumesRoot) {
+            return .failure(MediaFolderCopy.sourceDisconnected)
+        }
+        if MediaFolderAvailability.isDisconnected(to, mountedVolumes: mountedVolumes, volumesRoot: volumesRoot) {
+            return .failure(MediaFolderCopy.destinationDisconnected)
         }
 
         do {
@@ -64,61 +86,71 @@ struct MediaLibraryMover {
         items: [WatchItem],
         onProgress: ((MediaLibraryMoveProgress) -> Void)?
     ) throws {
-        let files = try listFiles(in: source)
-        try assertNoConflicts(files: files, source: source, destination: destination)
-
-        let destinationExisted = fileManager.fileExists(atPath: destination.path)
+        let marker = MediaFolderMoveMarker.url(beside: dataFile)
+        try writeMarker(marker, from: source, to: destination)
         var copied: [URL] = []
-        var committed = false
-        defer {
-            if !committed {
-                rollback(copied: copied, destination: destination, destinationExisted: destinationExisted)
-            }
-        }
-
-        if !destinationExisted {
-            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-        }
-
-        let total = files.count
-        for (index, file) in files.enumerated() {
-            let relative = relativePath(of: file, to: source)
-            let destFile = destination.appendingPathComponent(relative)
-            let destParent = destFile.deletingLastPathComponent()
-            if !fileManager.fileExists(atPath: destParent.path) {
-                try fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
-            }
-            if fileManager.fileExists(atPath: destFile.path) {
-                onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
-                continue
-            }
-            try copyItem(file, destFile)
-            copied.append(destFile)
-            onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
-        }
-
-        try verify(files: files, source: source, destination: destination)
-
+        let destinationExisted = fileManager.fileExists(atPath: destination.path)
+        let previousPreference = defaults.string(forKey: MediaFolderPreference.key)
         var backupURL: URL?
-        if fileManager.fileExists(atPath: dataFile.path) {
-            let backup = backupURLForQueue(dataFile)
-            try fileManager.copyItem(at: dataFile, to: backup)
-            backupURL = backup
-        }
+        var committedMetadata = false
 
         do {
+            let files = try listFiles(in: source)
+            try assertNoConflicts(files: files, source: source, destination: destination)
+
+            if !destinationExisted {
+                try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+            }
+
+            let total = files.count
+            for (index, file) in files.enumerated() {
+                let relative = relativePath(of: file, to: source)
+                let destFile = destination.appendingPathComponent(relative)
+                let destParent = destFile.deletingLastPathComponent()
+                if !fileManager.fileExists(atPath: destParent.path) {
+                    try fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
+                }
+                if fileManager.fileExists(atPath: destFile.path) {
+                    onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
+                    continue
+                }
+                copied.append(destFile)
+                try copyItem(file, destFile)
+                onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
+            }
+
+            try verify(files: files, source: source, destination: destination)
+
+            if fileManager.fileExists(atPath: dataFile.path) {
+                let backup = backupURLForQueue(dataFile)
+                try fileManager.copyItem(at: dataFile, to: backup)
+                backupURL = backup
+            }
             try writeRemappedQueue(items: items, from: source, to: destination, dataFile: dataFile)
             MediaFolderPreference.save(destination, defaults: defaults)
-        } catch {
-            if let backupURL {
-                try? fileManager.removeItem(at: dataFile)
-                try? fileManager.copyItem(at: backupURL, to: dataFile)
-            }
-            throw error
-        }
+            committedMetadata = true
 
-        committed = true
-        deleteVerifiedSources(files)
+            try deleteVerifiedSources(files)
+            try clearMarker(marker)
+        } catch {
+            if committedMetadata {
+                throw MediaLibraryMoveFailure(
+                    "\(error.localizedDescription)；片库路径已指向新目录，请处理未完成的搬移"
+                )
+            }
+            var parts = [error.localizedDescription]
+            if let restoreError = restoreQueue(dataFile: dataFile, backupURL: backupURL) {
+                parts.append(restoreError)
+            }
+            restorePreference(previousPreference)
+            if let rollbackError = rollback(copied: copied, destination: destination, destinationExisted: destinationExisted) {
+                parts.append(rollbackError)
+            }
+            if let markerError = clearMarkerIfPossible(marker) {
+                parts.append(markerError)
+            }
+            throw MediaLibraryMoveFailure(parts.joined(separator: "；"))
+        }
     }
 
     private func assertNoConflicts(files: [URL], source: URL, destination: URL) throws {
@@ -179,25 +211,40 @@ struct MediaLibraryMover {
     private func listFiles(in root: URL) throws -> [URL] {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
-            return []
+            throw MediaLibraryMoveFailure("源目录不存在，无法搬移")
         }
-        guard isDirectory.boolValue else { return [] }
+        guard isDirectory.boolValue else {
+            throw MediaLibraryMoveFailure("源路径不是目录，无法搬移")
+        }
+        guard fileManager.isReadableFile(atPath: root.path) else {
+            throw MediaLibraryMoveFailure("枚举源目录失败：没有读取权限")
+        }
+        var enumerationError: Error?
         guard let enumerator = fileManager.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
             options: [],
-            errorHandler: { _, _ in true }
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
         ) else {
-            return []
+            throw MediaLibraryMoveFailure("无法枚举源目录")
         }
         var files: [URL] = []
         for case let file as URL in enumerator {
+            if let enumerationError {
+                throw MediaLibraryMoveFailure("枚举源目录失败：\(enumerationError.localizedDescription)")
+            }
             if file.lastPathComponent == ".DS_Store" { continue }
             let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
             if values.isDirectory == true { continue }
             if values.isRegularFile == true {
                 files.append(file.standardizedFileURL)
             }
+        }
+        if let enumerationError {
+            throw MediaLibraryMoveFailure("枚举源目录失败：\(enumerationError.localizedDescription)")
         }
         return files
     }
@@ -244,18 +291,78 @@ struct MediaLibraryMover {
         try data.write(to: dataFile, options: .atomic)
     }
 
-    private func deleteVerifiedSources(_ files: [URL]) {
+    private func deleteVerifiedSources(_ files: [URL]) throws {
+        var failures: [String] = []
         for file in files {
-            try? fileManager.removeItem(at: file)
+            do {
+                try removeItem(file)
+            } catch {
+                failures.append("\(file.lastPathComponent)：\(error.localizedDescription)")
+            }
+        }
+        if !failures.isEmpty {
+            throw MediaLibraryMoveFailure("删除原文件没有完成：\(failures.joined(separator: "；"))")
         }
     }
 
-    private func rollback(copied: [URL], destination: URL, destinationExisted: Bool) {
+    private func rollback(copied: [URL], destination: URL, destinationExisted: Bool) -> String? {
+        var failures: [String] = []
         for file in copied {
-            try? fileManager.removeItem(at: file)
+            guard fileManager.fileExists(atPath: file.path) else { continue }
+            do {
+                try removeItem(file)
+            } catch {
+                failures.append("\(file.lastPathComponent)：\(error.localizedDescription)")
+            }
         }
-        if !destinationExisted {
-            try? fileManager.removeItem(at: destination)
+        if !destinationExisted, fileManager.fileExists(atPath: destination.path) {
+            do {
+                try removeItem(destination)
+            } catch {
+                failures.append("目标目录：\(error.localizedDescription)")
+            }
+        }
+        guard !failures.isEmpty else { return nil }
+        return "回滚目标文件没有完成：\(failures.joined(separator: "；"))"
+    }
+
+    private func writeMarker(_ marker: URL, from source: URL, to destination: URL) throws {
+        let body = "from=\(source.path)\nto=\(destination.path)\n"
+        try Data(body.utf8).write(to: marker, options: .atomic)
+    }
+
+    private func clearMarker(_ marker: URL) throws {
+        guard fileManager.fileExists(atPath: marker.path) else { return }
+        try removeItem(marker)
+    }
+
+    private func clearMarkerIfPossible(_ marker: URL) -> String? {
+        do {
+            try clearMarker(marker)
+            return nil
+        } catch {
+            return "未能清除进行中标记：\(error.localizedDescription)"
+        }
+    }
+
+    private func restoreQueue(dataFile: URL, backupURL: URL?) -> String? {
+        guard let backupURL, fileManager.fileExists(atPath: backupURL.path) else { return nil }
+        do {
+            if fileManager.fileExists(atPath: dataFile.path) {
+                try removeItem(dataFile)
+            }
+            try fileManager.copyItem(at: backupURL, to: dataFile)
+            return nil
+        } catch {
+            return "恢复 queue.json 没有完成：\(error.localizedDescription)"
+        }
+    }
+
+    private func restorePreference(_ previous: String?) {
+        if let previous {
+            defaults.set(previous, forKey: MediaFolderPreference.key)
+        } else {
+            defaults.removeObject(forKey: MediaFolderPreference.key)
         }
     }
 }

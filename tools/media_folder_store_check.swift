@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// 真实 `QueueStore(dataFile:mediaFolder:)` 装配：未连接不建目录、不启动下载、搬移后目录跟着变。
@@ -7,6 +8,10 @@ struct MediaFolderStoreCheck {
         try await checkDisconnectedDoesNotCreateFolderOrStartDownload()
         try await checkRealVolumesPathStaysAbsent()
         try await checkMoveUpdatesStoreMediaFolder()
+        try await checkDisconnectedSourceMoveIsRejected()
+        try await checkDisconnectedDestinationMoveDoesNotCreate()
+        try await checkIncompleteMarkerRefusesNewMove()
+        try await checkSettingsMirrorSeesFailureAfterChange()
         print("media_folder_store_check=passed")
     }
 
@@ -129,6 +134,172 @@ struct MediaFolderStoreCheck {
             precondition(store.items.first?.localFilePath == dest.appendingPathComponent("\(id.uuidString).mp4").path)
             precondition(!FileManager.default.fileExists(atPath: video.path))
             precondition(FileManager.default.fileExists(atPath: dest.appendingPathComponent("\(id.uuidString).mp4").path))
+        }
+    }
+
+    /// 审查 1：QueueStore 默认搬移器也拒绝未连接的源片库。
+    private static func checkDisconnectedSourceMoveIsRejected() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let fakeVolumes = env.root.appendingPathComponent("Volumes", isDirectory: true)
+        let missing = fakeVolumes.appendingPathComponent("不存在的卷/seesee", isDirectory: true)
+        try writeQueue([], to: env.dataFile)
+        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
+
+        let store = await MainActor.run {
+            QueueStore(
+                dataFile: env.dataFile,
+                mediaFolder: missing,
+                defaults: env.defaults,
+                mountedVolumeURLs: [URL(fileURLWithPath: "/")],
+                volumesRoot: fakeVolumes
+            )
+        }
+        let result = await MainActor.run {
+            store.moveMediaFolder(to: dest)
+        }
+        await MainActor.run {
+            precondition(result == .failure(MediaFolderCopy.sourceDisconnected), "未连接源必须拒绝，实际 \(result)")
+            precondition(store.mediaFolderMoveMessage == MediaFolderCopy.failure(MediaFolderCopy.sourceDisconnected))
+            let leftover = try! JSONDecoder().decode([WatchItem].self, from: Data(contentsOf: env.dataFile))
+            precondition(leftover.isEmpty, "未连接时不得改写队列条目")
+            precondition(env.defaults.string(forKey: MediaFolderPreference.key) == nil)
+            precondition(!FileManager.default.fileExists(atPath: dest.path))
+        }
+    }
+
+    /// 审查 4：QueueStore 默认搬移器对未挂载目标不得建目录。
+    private static func checkDisconnectedDestinationMoveDoesNotCreate() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let fakeVolumes = env.root.appendingPathComponent("Volumes", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeVolumes, withIntermediateDirectories: true)
+        let dest = fakeVolumes.appendingPathComponent("不存在的卷/seesee", isDirectory: true)
+        try writeQueue([], to: env.dataFile)
+
+        let store = await MainActor.run {
+            QueueStore(
+                dataFile: env.dataFile,
+                mediaFolder: env.mediaFolder,
+                defaults: env.defaults,
+                mountedVolumeURLs: [URL(fileURLWithPath: "/")],
+                volumesRoot: fakeVolumes
+            )
+        }
+        let result = await MainActor.run {
+            store.moveMediaFolder(to: dest)
+        }
+        await MainActor.run {
+            precondition(
+                result == .failure(MediaFolderCopy.destinationDisconnected),
+                "目标未连接必须拒绝，实际 \(result)"
+            )
+            precondition(store.mediaFolderMoveMessage == MediaFolderCopy.failure(MediaFolderCopy.destinationDisconnected))
+            precondition(!FileManager.default.fileExists(atPath: dest.path))
+            precondition(!FileManager.default.fileExists(atPath: fakeVolumes.appendingPathComponent("不存在的卷").path))
+        }
+    }
+
+    /// 审查 3：启动时发现进行中标记，拒绝新搬移并提示上次未完成。
+    private static func checkIncompleteMarkerRefusesNewMove() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        try Data("from=/old\nto=/new\n".utf8).write(to: MediaFolderMoveMarker.url(beside: env.dataFile))
+        let video = env.mediaFolder.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        try writeQueue([], to: env.dataFile)
+
+        let store = await MainActor.run {
+            QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
+        }
+        await MainActor.run {
+            precondition(
+                store.mediaFolderMoveMessage == MediaFolderCopy.failure(MediaFolderCopy.incompleteMove),
+                "启动时必须提示上次搬移未完成"
+            )
+        }
+        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
+        let result = await MainActor.run {
+            store.moveMediaFolder(to: dest)
+        }
+        await MainActor.run {
+            precondition(result == .failure(MediaFolderCopy.incompleteMove), "有标记时拒绝新搬移，实际 \(result)")
+            precondition(store.mediaFolderMoveMessage == MediaFolderCopy.failure(MediaFolderCopy.incompleteMove))
+            precondition(FileManager.default.fileExists(atPath: video.path))
+            precondition(!FileManager.default.fileExists(atPath: dest.path))
+        }
+    }
+
+    /// 审查 5：设置页订赋值后的发布，看到的失败文案与 store 最终值一致。
+    private static func checkSettingsMirrorSeesFailureAfterChange() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let id = UUID()
+        let name = "\(id.uuidString).mp4"
+        let video = env.mediaFolder.appendingPathComponent(name)
+        try Data("video-bytes-one".utf8).write(to: video)
+        try writeQueue([
+            WatchItem(
+                id: id,
+                urlString: "https://example.com/conflict",
+                title: "conflict",
+                author: "check",
+                duration: 8,
+                addedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                watchedAt: nil,
+                state: .ready,
+                progress: 1,
+                progressLabel: "已下载",
+                localFilePath: video.path,
+                errorMessage: nil,
+                playbackPosition: nil,
+                chapters: nil,
+                thumbnailFilePath: nil,
+                subtitleFilePath: nil
+            )
+        ], to: env.dataFile)
+
+        let dest = env.root.appendingPathComponent("existing", isDirectory: true)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        try Data("different-existing".utf8).write(to: dest.appendingPathComponent(name))
+
+        let observed = await MainActor.run { () -> (MediaLibraryMoveResult, String?, String?) in
+            let store = QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
+            let mirror = SettingsPageMirror()
+            mirror.bind(store)
+            let result = store.moveMediaFolder(to: dest)
+            return (result, store.mediaFolderMoveMessage, mirror.failure)
+        }
+        guard case .failure(let reason) = observed.0 else {
+            fatalError("冲突必须失败，实际 \(observed.0)")
+        }
+        let expected = MediaFolderCopy.failure(reason)
+        precondition(observed.1 == expected, "store 最终失败文案必须是包装后的原因")
+        precondition(
+            observed.2 == expected,
+            "设置页订赋值后发布，必须拿到与 store 一致的失败文案，实际 \(String(describing: observed.2))"
+        )
+        precondition(observed.1 == observed.2)
+    }
+
+    /// 与 `DigestSettingsLiveView` 相同：订 `$published`，不订 `objectWillChange`。
+    @MainActor
+    private final class SettingsPageMirror {
+        var failure: String?
+        var folder: URL?
+        private var bag = Set<AnyCancellable>()
+
+        func bind(_ store: QueueStore) {
+            store.$mediaFolderMoveMessage
+                .sink { [weak self] in self?.failure = $0 }
+                .store(in: &bag)
+            store.$mediaFolder
+                .sink { [weak self] in self?.folder = $0 }
+                .store(in: &bag)
         }
     }
 

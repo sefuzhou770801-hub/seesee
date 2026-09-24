@@ -120,6 +120,7 @@ final class QueueStore: ObservableObject {
         refreshMediaFolderConnection()
         createMediaFolderIfConnected()
         load()
+        applyIncompleteMoveBannerIfNeeded()
         migrateQueueToNewestFirstIfNeeded()
 
         if migration.didMoveMediaFolder, MediaFolderPreference.resolve(defaults: .standard) == nil {
@@ -163,6 +164,7 @@ final class QueueStore: ObservableObject {
         refreshMediaFolderConnection()
         createMediaFolderIfConnected()
         load()
+        applyIncompleteMoveBannerIfNeeded()
     }
 
     private func wireMonitors() {
@@ -686,13 +688,21 @@ final class QueueStore: ObservableObject {
         guard !isMovingMediaFolder else {
             return .failure("正在搬移视频")
         }
+        if MediaFolderMoveMarker.exists(beside: dataFile) {
+            mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.incompleteMove)
+            return .failure(MediaFolderCopy.incompleteMove)
+        }
         isMovingMediaFolder = true
         mediaFolderMoveMessage = nil
         mediaFolderMoveProgress = nil
         defer { isMovingMediaFolder = false }
 
         flushPendingSaves()
-        let used = mover ?? MediaLibraryMover(defaults: defaults)
+        let used = mover ?? MediaLibraryMover(
+            defaults: defaults,
+            mountedVolumes: resolveMountedVolumes(),
+            volumesRoot: volumesRoot
+        )
         let result = used.move(
             from: mediaFolder,
             to: destination,
@@ -706,18 +716,38 @@ final class QueueStore: ObservableObject {
 
         switch result {
         case .success:
-            mediaFolder = destination.standardizedFileURL
-            load()
-            refreshMediaFolderConnection()
+            applyMovedMediaFolder(destination)
             mediaFolderMoveMessage = nil
             MediaFolderLog.info("move succeeded: \(destination.path)")
         case .noOp:
             MediaFolderLog.info("move skipped: destination is the current folder")
         case .failure(let reason):
-            mediaFolderMoveMessage = MediaFolderCopy.failure(reason)
+            reconcileAfterFailedMove(destination: destination, reason: reason)
             MediaFolderLog.error("move failed: \(reason)")
         }
         return result
+    }
+
+    private func applyMovedMediaFolder(_ destination: URL) {
+        mediaFolder = destination.standardizedFileURL
+        load()
+        refreshMediaFolderConnection()
+    }
+
+    private func reconcileAfterFailedMove(destination: URL, reason: String) {
+        mediaFolderMoveMessage = MediaFolderCopy.failure(reason)
+        guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
+        if let saved = MediaFolderPreference.resolve(defaults: defaults),
+           saved.standardizedFileURL.path == destination.standardizedFileURL.path {
+            mediaFolder = saved
+            load()
+            refreshMediaFolderConnection()
+        }
+    }
+
+    private func applyIncompleteMoveBannerIfNeeded() {
+        guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
+        mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.incompleteMove)
     }
 
     func refreshMediaFolderConnection() {

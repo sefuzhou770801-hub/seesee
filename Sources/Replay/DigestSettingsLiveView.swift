@@ -1,6 +1,8 @@
+import Combine
 import SwiftUI
 
 /// 设置窗观察 QueueStore，把片库路径、未连接和搬移进度同步进设置页模型。
+/// 必须订 `$published`（赋值之后的值），不能订 `objectWillChange` 再立刻读——那时新值还没写上。
 struct DigestSettingsLiveView: View {
     @ObservedObject var store: QueueStore
     @StateObject private var model: DigestSettingsModel
@@ -12,17 +14,14 @@ struct DigestSettingsLiveView: View {
 
     var body: some View {
         DigestSettingsView(model: model)
-            .onAppear(perform: syncFromStore)
-            .onReceive(store.objectWillChange) { _ in
-                syncFromStore()
-            }
+            .onAppear(perform: bindActions)
+            .onReceive(store.$mediaFolder) { model.mediaFolder = $0 }
+            .onReceive(store.$isMediaFolderDisconnected) { model.isMediaFolderDisconnected = $0 }
+            .onReceive(store.$mediaFolderMoveProgress) { model.mediaFolderMoveProgress = $0 }
+            .onReceive(store.$mediaFolderMoveMessage) { model.mediaFolderMoveFailure = $0 }
     }
 
-    private func syncFromStore() {
-        model.mediaFolder = store.mediaFolder
-        model.isMediaFolderDisconnected = store.isMediaFolderDisconnected
-        model.mediaFolderMoveProgress = store.mediaFolderMoveProgress
-        model.mediaFolderMoveFailure = store.mediaFolderMoveMessage
+    private func bindActions() {
         model.onChangeMediaFolder = { [store] in
             store.presentMediaFolderPicker()
         }
