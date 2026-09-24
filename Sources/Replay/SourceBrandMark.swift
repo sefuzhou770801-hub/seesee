@@ -1,5 +1,7 @@
 import SwiftUI
 
+// YouTube / X 官方标志路径取自 Simple Icons 16.32.0（CC0-1.0）。
+
 struct SourceBrandMark: View {
     let sourceName: String
 
@@ -22,15 +24,17 @@ struct SourceBrandMark: View {
         }
     }
 
-    // 队列元数据行只保留单色图标做来源识别，品牌色在灰阶列表里过于抢眼。
     private var youtubeMark: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                .fill(OpenMyChrome.muted)
-            Image(systemName: "play.fill")
-                .font(.system(size: 6, weight: .bold))
-                .foregroundStyle(OpenMyChrome.canvas)
-                .offset(x: 0.4)
+            RoundedRectangle(cornerRadius: 1.8, style: .continuous)
+                .fill(Color(red: 1, green: 0, blue: 0))
+            Path { path in
+                path.move(to: CGPoint(x: 5.57, y: 2.89))
+                path.addLine(to: CGPoint(x: 5.57, y: 7.11))
+                path.addLine(to: CGPoint(x: 9.23, y: 5.00))
+                path.closeSubpath()
+            }
+            .fill(Color.white)
         }
         .frame(width: 14, height: 10)
     }
@@ -82,13 +86,38 @@ struct SourceBrandMark: View {
     }
 
     private var xMark: some View {
-        Path { path in
-            path.move(to: CGPoint(x: 1.4, y: 1.4))
-            path.addLine(to: CGPoint(x: 10.6, y: 10.6))
-            path.move(to: CGPoint(x: 10.6, y: 1.4))
-            path.addLine(to: CGPoint(x: 1.4, y: 10.6))
-        }
-        .stroke(OpenMyChrome.muted, style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
-        .frame(width: 12, height: 12)
+        xLogoPath
+            .fill(OpenMyChrome.ink)
+            .frame(width: 12, height: 12)
+    }
+
+    /// Simple Icons 的 X 字标：外轮廓 + 反向缠绕的内部子路径，nonzero 填充后中间镂空。
+    private var xLogoPath: Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 14.234, y: 10.162))
+        path.addLine(to: CGPoint(x: 22.977, y: 0))
+        path.addLine(to: CGPoint(x: 20.905, y: 0))
+        path.addLine(to: CGPoint(x: 13.314, y: 8.824))
+        path.addLine(to: CGPoint(x: 7.251, y: 0))
+        path.addLine(to: CGPoint(x: 0.258, y: 0))
+        path.addLine(to: CGPoint(x: 9.426, y: 13.343))
+        path.addLine(to: CGPoint(x: 0.258, y: 24))
+        path.addLine(to: CGPoint(x: 2.33, y: 24))
+        path.addLine(to: CGPoint(x: 10.346, y: 14.682))
+        path.addLine(to: CGPoint(x: 16.749, y: 24))
+        path.addLine(to: CGPoint(x: 23.742, y: 24))
+        path.closeSubpath()
+
+        path.move(to: CGPoint(x: 11.397, y: 13.461))
+        path.addLine(to: CGPoint(x: 10.468, y: 12.132))
+        path.addLine(to: CGPoint(x: 3.076, y: 1.56))
+        path.addLine(to: CGPoint(x: 6.258, y: 1.56))
+        path.addLine(to: CGPoint(x: 12.223, y: 10.092))
+        path.addLine(to: CGPoint(x: 13.152, y: 11.421))
+        path.addLine(to: CGPoint(x: 20.906, y: 22.511))
+        path.addLine(to: CGPoint(x: 17.724, y: 22.511))
+        path.closeSubpath()
+
+        return path.applying(CGAffineTransform(scaleX: 0.5, y: 0.5))
     }
 }
