@@ -289,6 +289,7 @@ compile_and_run digest_api \
     "$project_dir/tools/digest_api_check.swift"
 
 compile_and_run digest_settings \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
     "$project_dir/Sources/Replay/WatchItem.swift" \
     "$project_dir/Sources/Replay/ChapterMetadata.swift" \
     "$project_dir/Sources/Replay/VideoSubtitles.swift" \
@@ -308,6 +309,7 @@ compile_and_run digest_settings \
     "$project_dir/tools/digest_settings_check.swift"
 
 compile_and_run digest_settings_proof \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
     "$project_dir/Sources/Replay/WatchItem.swift" \
     "$project_dir/Sources/Replay/ChapterMetadata.swift" \
     "$project_dir/Sources/Replay/VideoSubtitles.swift" \
@@ -451,6 +453,30 @@ compile_and_run qa_session \
     "$project_dir/Sources/Replay/WatchQASession.swift" \
     "$project_dir/tools/qa_session_check.swift"
 
+compile_and_run media_library_mover \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
+    "$project_dir/Sources/Replay/MediaFolderAvailability.swift" \
+    "$project_dir/Sources/Replay/MediaFolderPreference.swift" \
+    "$project_dir/Sources/Replay/MediaFolderLaunchArguments.swift" \
+    "$project_dir/Sources/Replay/MediaLibraryMover.swift" \
+    "$project_dir/tools/media_library_mover_check.swift"
+
+compile_and_run media_folder_settings_proof \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/WatchQAContext.swift" \
+    "$project_dir/Sources/Replay/DigestCopy.swift" \
+    "$project_dir/Sources/Replay/DigestOverview.swift" \
+    "$project_dir/Sources/Replay/DigestAPI.swift" \
+    "$project_dir/Sources/Replay/OpenMyChrome.swift" \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
+    "$project_dir/Sources/Replay/DigestSettings.swift" \
+    "$project_dir/Sources/Replay/DigestSettingsView.swift" \
+    "$project_dir/tools/media_folder_settings_proof.swift"
+
 # 删除接线：经真实生产入口 QueueStore.remove（注入隔离目录）验证 qa sidecar 一并清掉。
 compile_and_run qa_remove \
     "$project_dir/Sources/Replay/WatchItem.swift" \
@@ -470,5 +496,36 @@ compile_and_run qa_remove \
     "$project_dir/Sources/Replay/ChannelWatchStore.swift" \
     "$project_dir/Sources/Replay/WatchQAStore.swift" \
     "$project_dir/Sources/Replay/DigestAnnotations.swift" \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
+    "$project_dir/Sources/Replay/MediaFolderAvailability.swift" \
+    "$project_dir/Sources/Replay/MediaFolderPreference.swift" \
+    "$project_dir/Sources/Replay/MediaFolderLaunchArguments.swift" \
+    "$project_dir/Sources/Replay/MediaLibraryMover.swift" \
     "$project_dir/Sources/Replay/QueueStore.swift" \
     "$project_dir/tools/qa_remove_check.swift"
+
+compile_and_run media_folder_store \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleTrackRank.swift" \
+    "$project_dir/Sources/Replay/NetworkMonitor.swift" \
+    "$project_dir/Sources/Replay/PowerModeMonitor.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/QueueRowMeta.swift" \
+    "$project_dir/Sources/Replay/URLIntake.swift" \
+    "$project_dir/Sources/Replay/DownloadRetryPolicy.swift" \
+    "$project_dir/Sources/Replay/ChannelLink.swift" \
+    "$project_dir/Sources/Replay/PlaylistListing.swift" \
+    "$project_dir/Sources/Replay/ChannelSubscription.swift" \
+    "$project_dir/Sources/Replay/DownloadEngine.swift" \
+    "$project_dir/Sources/Replay/ChannelWatchStore.swift" \
+    "$project_dir/Sources/Replay/WatchQAStore.swift" \
+    "$project_dir/Sources/Replay/DigestAnnotations.swift" \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
+    "$project_dir/Sources/Replay/MediaFolderAvailability.swift" \
+    "$project_dir/Sources/Replay/MediaFolderPreference.swift" \
+    "$project_dir/Sources/Replay/MediaFolderLaunchArguments.swift" \
+    "$project_dir/Sources/Replay/MediaLibraryMover.swift" \
+    "$project_dir/Sources/Replay/QueueStore.swift" \
+    "$project_dir/tools/media_folder_store_check.swift"

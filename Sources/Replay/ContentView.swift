@@ -64,12 +64,18 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) {
-            if let notice = store.intakeNotice {
-                IntakeToast(notice: notice, dismiss: store.dismissIntakeNotice)
-                    .padding(.top, 12)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(20)
+            VStack(spacing: 8) {
+                if store.isMediaFolderDisconnected {
+                    MediaFolderDisconnectedBanner(path: DigestSettingsCopy.displayPath(store.mediaFolder))
+                        .padding(.top, 12)
+                }
+                if let notice = store.intakeNotice {
+                    IntakeToast(notice: notice, dismiss: store.dismissIntakeNotice)
+                        .padding(.top, store.isMediaFolderDisconnected ? 0 : 12)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .zIndex(20)
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.86), value: store.intakeNotice?.id)
         .onAppear {
@@ -1281,7 +1287,9 @@ private struct VideoDetail: View {
     private var playerSurface: some View {
         ZStack(alignment: .bottom) {
             Group {
-                if isItemPlayable, let fileURL = displayedItem.localFileURL {
+                if store.isMediaFolderDisconnected, displayedItem.state == .ready {
+                    disconnectedPlaybackState
+                } else if isItemPlayable, let fileURL = displayedItem.localFileURL {
                     GeometryReader { geometry in
                         LocalVideoPlayer(
                             url: fileURL,
@@ -1442,6 +1450,32 @@ private struct VideoDetail: View {
             : .easeOut(duration: 0.15)
     }
 
+    private var disconnectedPlaybackState: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color.black.opacity(0.28), Color.black.opacity(0.82)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            VStack(spacing: 12) {
+                Image(systemName: "externaldrive.badge.xmark")
+                    .font(.system(size: 38, weight: .light))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.white)
+                Text(MediaFolderCopy.disconnected)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .accessibilityLabel(MediaFolderCopy.disconnected)
+                Text(DigestSettingsCopy.displayPath(store.mediaFolder))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            .padding(40)
+        }
+    }
+
     @ViewBuilder
     private var downloadState: some View {
         ZStack {
@@ -1587,6 +1621,36 @@ private struct VideoDetail: View {
     private func collapseSidebarForNarrowChapterLayoutIfNeeded() {
         guard prefersOneSidePane, chaptersPresented, !sidebarCollapsed else { return }
         collapseSidebar()
+    }
+}
+
+private struct MediaFolderDisconnectedBanner: View {
+    let path: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "externaldrive.badge.xmark")
+                .foregroundStyle(OpenMyChrome.rec)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(MediaFolderCopy.disconnected)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(OpenMyChrome.ink)
+                Text(path)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(OpenMyChrome.muted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(OpenMyChrome.raise, in: RoundedRectangle(cornerRadius: OpenMyChrome.radiusSm, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: OpenMyChrome.radiusSm, style: .continuous)
+                .strokeBorder(OpenMyChrome.hair)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(MediaFolderCopy.disconnected) \(path)")
     }
 }
 
