@@ -38,24 +38,30 @@ struct VideoSubtitlePresentation: Equatable, Identifiable, Sendable {
         at time: Double
     ) -> VideoSubtitlePresentation? {
         guard mode != .off, let track, time.isFinite else { return nil }
-        let base: VideoSubtitlePresentation?
-        if let cue = track.cue(at: time) {
-            base = presentation(for: cue)
-        } else {
-            base = holdOverPresentation(track: track, at: time)
-        }
-        guard let base else { return nil }
-        return applying(mode, to: base)
+        let cue = track.cue(at: time) ?? holdOverCue(track: track, at: time)
+        guard let cue else { return nil }
+        return applying(mode, to: presentation(for: cue))
     }
 
-    /// 仅译文档：丢掉原文行只留译文；没有译文的 cue（纯原文轨）不显示。
+    /// CJK 统一汉字基本区 U+4E00–U+9FFF 与扩展 A 区 U+3400–U+4DBF。
+    private static func containsHan(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+        }
+    }
+
+    /// 仅译文档：丢掉原文行只留译文；没有译文的 cue（纯外文原文轨）不显示。
+    /// 折叠后只剩一行时，含汉字则视为译文并显示（中文原声、机翻中文轨）。
     private static func applying(
         _ mode: SubtitleDisplayMode,
         to presentation: VideoSubtitlePresentation
     ) -> VideoSubtitlePresentation? {
         guard mode == .translationOnly else { return presentation }
         let lines = displayLines(from: presentation.text)
-        guard lines.count >= 2 else { return nil }
+        if lines.count == 1 {
+            return containsHan(lines[0]) ? presentation : nil
+        }
         return VideoSubtitlePresentation(
             id: presentation.id,
             text: lines.dropFirst().joined(separator: "\n")
@@ -84,17 +90,17 @@ struct VideoSubtitlePresentation: Equatable, Identifiable, Sendable {
         VideoSubtitlePresentation(id: cue.id, text: displayText(from: cue.text))
     }
 
-    private static func holdOverPresentation(
+    private static func holdOverCue(
         track: VideoSubtitleTrack,
         at time: Double
-    ) -> VideoSubtitlePresentation? {
+    ) -> VideoSubtitleCue? {
         let previous = track.cues.last { $0.endTime <= time }
         guard let previous else { return nil }
         let next = track.cues.first { $0.startTime >= time }
         guard let next else { return nil }
         let gap = next.startTime - previous.endTime
         guard gap > 0, gap <= interCueHoldThreshold, time < next.startTime else { return nil }
-        return presentation(for: previous)
+        return previous
     }
 }
 
