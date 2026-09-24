@@ -67,22 +67,65 @@ write_queue() {
     python3 - "$support/queue.json" "$source_dir" "$id1" "$id2" "$id3" <<'PY'
 import json, sys
 path, folder, *ids = sys.argv[1:]
-items = []
-for index, item_id in enumerate(ids, start=1):
-    items.append({
-        "id": item_id,
-        "urlString": f"https://example.com/{index}",
-        "title": f"视频{index}",
+items = [
+    {
+        "id": ids[0],
+        "urlString": "https://example.com/1",
+        "title": "视频1",
         "author": "launch",
         "duration": 10,
         "addedAt": "2024-01-01T00:00:00Z",
+        "watchedAt": "2024-02-01T00:00:00Z",
         "state": "ready",
         "progress": 1,
         "progressLabel": "已下载",
-        "localFilePath": f"{folder}/{item_id}.mp4",
-        "thumbnailFilePath": f"{folder}/{item_id}.jpg",
-        "subtitleFilePath": f"{folder}/{item_id}.zh.srt",
-    })
+        "localFilePath": f"{folder}/{ids[0]}.mp4",
+        "errorMessage": None,
+        "playbackPosition": 30.5,
+        "chapters": [
+            {"title": "开场", "startTime": 0, "endTime": 12},
+            {"title": "正片", "startTime": 12},
+        ],
+        "thumbnailFilePath": f"{folder}/{ids[0]}.jpg",
+        "subtitleFilePath": f"{folder}/{ids[0]}.zh.srt",
+    },
+    {
+        "id": ids[1],
+        "urlString": "https://example.com/2",
+        "title": "视频2",
+        "author": "launch",
+        "duration": 10,
+        "addedAt": "2024-01-01T00:00:00Z",
+        "watchedAt": None,
+        "state": "ready",
+        "progress": 1,
+        "progressLabel": "已下载",
+        "localFilePath": f"{folder}/{ids[1]}.mp4",
+        "errorMessage": "上次下载中断过",
+        "playbackPosition": None,
+        "chapters": None,
+        "thumbnailFilePath": f"{folder}/{ids[1]}.jpg",
+        "subtitleFilePath": f"{folder}/{ids[1]}.zh.srt",
+    },
+    {
+        "id": ids[2],
+        "urlString": "https://example.com/3",
+        "title": "视频3",
+        "author": "launch",
+        "duration": 10,
+        "addedAt": "2024-01-01T00:00:00Z",
+        "watchedAt": None,
+        "state": "ready",
+        "progress": 1,
+        "progressLabel": "已下载",
+        "localFilePath": f"{folder}/{ids[2]}.mp4",
+        "errorMessage": None,
+        "playbackPosition": None,
+        "chapters": None,
+        "thumbnailFilePath": f"{folder}/{ids[2]}.jpg",
+        "subtitleFilePath": f"{folder}/{ids[2]}.zh.srt",
+    },
+]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(items, handle)
 PY
@@ -161,8 +204,12 @@ after_path, before_path, backup_path, dest, *ids = sys.argv[1:]
 after = json.load(open(after_path, encoding="utf-8"))
 before = json.load(open(before_path, encoding="utf-8"))
 backup = json.load(open(backup_path, encoding="utf-8"))
-identity = ["id", "urlString", "title", "author", "duration", "addedAt", "state", "progress", "progressLabel"]
-path_keys = ["localFilePath", "thumbnailFilePath", "subtitleFilePath"]
+all_keys = [
+    "id", "urlString", "title", "author", "duration", "addedAt", "watchedAt",
+    "state", "progress", "progressLabel", "localFilePath", "errorMessage",
+    "playbackPosition", "chapters", "thumbnailFilePath", "subtitleFilePath",
+]
+path_keys = {"localFilePath", "thumbnailFilePath", "subtitleFilePath"}
 suffix = {"localFilePath": ".mp4", "thumbnailFilePath": ".jpg", "subtitleFilePath": ".zh.srt"}
 
 def by_id(items):
@@ -175,6 +222,20 @@ def same_path(left, right):
         return False
     return os.path.realpath(left) == os.path.realpath(right)
 
+def same_value(left, right):
+    if left == right:
+        return True
+    if isinstance(left, list) and isinstance(right, list):
+        return [strip_nulls(item) for item in left] == [strip_nulls(item) for item in right]
+    return strip_nulls(left) == strip_nulls(right)
+
+def strip_nulls(value):
+    if isinstance(value, dict):
+        return {key: strip_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [strip_nulls(item) for item in value]
+    return value
+
 if {item["id"] for item in after} != set(ids):
     raise SystemExit(f"queue id 集合不对: {[item['id'] for item in after]}")
 before_map, backup_map, after_map = by_id(before), by_id(backup), by_id(after)
@@ -182,15 +243,21 @@ if {item["id"] for item in backup} != set(ids):
     raise SystemExit("备份 queue 条目与搬移前不一致")
 for item_id in ids:
     original, remapped, saved = before_map[item_id], after_map[item_id], backup_map[item_id]
-    for key in identity:
-        if original.get(key) != remapped.get(key) or original.get(key) != saved.get(key):
-            raise SystemExit(f"{item_id} 字段 {key} 被意外改动: before={original.get(key)} after={remapped.get(key)} backup={saved.get(key)}")
-    for key in path_keys:
-        expected = f"{dest}/{item_id}{suffix[key]}"
-        if not same_path(remapped.get(key), expected):
-            raise SystemExit(f"{item_id} {key} 未改到新目录: {remapped.get(key)} != {expected}")
-        if not same_path(saved.get(key), original.get(key)):
-            raise SystemExit(f"备份 {item_id} {key} 不是搬移前的值")
+    extra = (set(original) | set(remapped) | set(saved)) - set(all_keys)
+    if extra:
+        raise SystemExit(f"{item_id} 出现未覆盖字段: {sorted(extra)}")
+    for key in all_keys:
+        if key in path_keys:
+            expected = f"{dest}/{item_id}{suffix[key]}"
+            if not same_path(remapped.get(key), expected):
+                raise SystemExit(f"{item_id} {key} 未改到新目录: {remapped.get(key)} != {expected}")
+            if not same_path(saved.get(key), original.get(key)):
+                raise SystemExit(f"备份 {item_id} {key} 不是搬移前的值")
+            continue
+        if not same_value(original.get(key), remapped.get(key)) or not same_value(original.get(key), saved.get(key)):
+            raise SystemExit(
+                f"{item_id} 字段 {key} 被意外改动: before={original.get(key)} after={remapped.get(key)} backup={saved.get(key)}"
+            )
 PY
 test ! -f "$support/media-folder-move.inprogress"
 pref=$(defaults read Replay MediaFolderPath)
@@ -226,33 +293,49 @@ test ! -f "$dest_fail/${id3}.mp4"
 test ! -f "$dest_fail/${id1}.jpg"
 test ! -f "$dest_fail/${id2}.jpg"
 test ! -f "$dest_fail/${id3}.jpg"
+test ! -f "$dest_fail/${id1}.zh.srt"
+test ! -f "$dest_fail/${id2}.zh.srt"
+test ! -f "$dest_fail/${id3}.zh.srt"
 python3 - "$support/queue.json" "$work/queue.fail-before.json" <<'PY'
 import json, os, sys
 after = json.load(open(sys.argv[1], encoding="utf-8"))
 before = json.load(open(sys.argv[2], encoding="utf-8"))
-identity = ["id", "urlString", "title", "author", "duration", "addedAt", "state", "progress", "progressLabel"]
-path_keys = ["localFilePath", "thumbnailFilePath", "subtitleFilePath"]
+all_keys = [
+    "id", "urlString", "title", "author", "duration", "addedAt", "watchedAt",
+    "state", "progress", "progressLabel", "localFilePath", "errorMessage",
+    "playbackPosition", "chapters", "thumbnailFilePath", "subtitleFilePath",
+]
+path_keys = {"localFilePath", "thumbnailFilePath", "subtitleFilePath"}
 
 def by_id(items):
     return {item["id"]: item for item in items}
+
+def strip_nulls(value):
+    if isinstance(value, dict):
+        return {key: strip_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [strip_nulls(item) for item in value]
+    return value
 
 def same(left, right, is_path):
     if not left and not right:
         return True
     if is_path and left and right:
         return os.path.realpath(left) == os.path.realpath(right)
-    return left == right
+    if left == right:
+        return True
+    return strip_nulls(left) == strip_nulls(right)
 
 if [item["id"] for item in after] != [item["id"] for item in before]:
     raise SystemExit(f"失败后 queue 条目顺序或 id 变了: {[item['id'] for item in after]}")
 after_map, before_map = by_id(after), by_id(before)
 for item_id, original in before_map.items():
     remapped = after_map[item_id]
-    for key in identity:
-        if not same(remapped.get(key), original.get(key), False):
-            raise SystemExit(f"失败后 {item_id} 字段 {key} 被改写: {remapped.get(key)} != {original.get(key)}")
-    for key in path_keys:
-        if not same(remapped.get(key), original.get(key), True):
+    extra = (set(original) | set(remapped)) - set(all_keys)
+    if extra:
+        raise SystemExit(f"失败后 {item_id} 出现未覆盖字段: {sorted(extra)}")
+    for key in all_keys:
+        if not same(remapped.get(key), original.get(key), key in path_keys):
             raise SystemExit(f"失败后 {item_id} 字段 {key} 被改写: {remapped.get(key)} != {original.get(key)}")
 PY
 test ! -f "$support/media-folder-move.inprogress"

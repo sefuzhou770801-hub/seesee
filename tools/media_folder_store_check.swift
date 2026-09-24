@@ -11,6 +11,7 @@ struct MediaFolderStoreCheck {
         try await checkDisconnectedSourceMoveIsRejected()
         try await checkDisconnectedDestinationMoveDoesNotCreate()
         try await checkIncompleteMarkerRefusesNewMove()
+        try await checkStaleCompletedMarkerIsClearedOnLaunch()
         try await checkPartialDeleteDoesNotClaimSourcesRemain()
         try await checkSettingsMirrorSeesFailureAfterChange()
         print("media_folder_store_check=passed")
@@ -231,6 +232,36 @@ struct MediaFolderStoreCheck {
             precondition(store.mediaFolderMoveMessage == expected)
             precondition(FileManager.default.fileExists(atPath: video.path))
             precondition(!FileManager.default.fileExists(atPath: dest.path))
+        }
+    }
+
+    /// 审查第 3 轮-1：偏好已指向标记目标时，启动应清掉过期标记，不要提示手动清理。
+    private static func checkStaleCompletedMarkerIsClearedOnLaunch() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        MediaFolderPreference.save(env.mediaFolder, defaults: env.defaults)
+        try Data("from=/old\nto=\(env.mediaFolder.path)\n".utf8)
+            .write(to: MediaFolderMoveMarker.url(beside: env.dataFile))
+        try writeQueue([], to: env.dataFile)
+
+        let store = await MainActor.run {
+            QueueStore(
+                dataFile: env.dataFile,
+                mediaFolder: env.mediaFolder,
+                defaults: env.defaults
+            )
+        }
+        await MainActor.run {
+            precondition(store.mediaFolderMoveMessage == nil, "已完成的过期标记不得提示未完成")
+            if let message = store.mediaFolderMoveMessage {
+                precondition(!message.contains(MediaFolderCopy.needsManualCleanup), "不得要求手动清理，实际 \(message)")
+                precondition(!message.contains("原来的视频都还在"), "不得谎称原文件还在，实际 \(message)")
+            }
+            precondition(
+                !FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path),
+                "过期标记应被自动清掉"
+            )
         }
     }
 

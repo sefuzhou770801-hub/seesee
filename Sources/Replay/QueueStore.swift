@@ -689,9 +689,13 @@ final class QueueStore: ObservableObject {
             return .failure("正在搬移视频")
         }
         if MediaFolderMoveMarker.exists(beside: dataFile) {
-            let reason = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
-            mediaFolderMoveMessage = reason
-            return .failure(reason)
+            if MediaFolderMoveMarker.clearIfStaleCompleted(beside: dataFile, defaults: defaults) {
+                MediaFolderLog.info("cleared stale completed move marker")
+            } else {
+                let reason = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
+                mediaFolderMoveMessage = reason
+                return .failure(reason)
+            }
         }
         isMovingMediaFolder = true
         mediaFolderMoveMessage = nil
@@ -752,6 +756,10 @@ final class QueueStore: ObservableObject {
 
     private func applyIncompleteMoveBannerIfNeeded() {
         guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
+        if MediaFolderMoveMarker.clearIfStaleCompleted(beside: dataFile, defaults: defaults) {
+            MediaFolderLog.info("cleared stale completed move marker")
+            return
+        }
         mediaFolderMoveMessage = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
     }
 

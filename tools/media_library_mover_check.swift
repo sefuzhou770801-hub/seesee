@@ -19,6 +19,8 @@ struct MediaLibraryMoverCheck {
         try checkDisconnectedDestinationDoesNotCreate()
         try checkRollbackReportsDeleteFailure()
         try checkRollbackCleanupFailureKeepsMarker()
+        try checkMarkerClearFailureIsStillSuccess()
+        try checkStaleCompletedMarkerAllowsNewMove()
         print("media_library_mover_check=passed")
     }
 
@@ -618,6 +620,73 @@ struct MediaLibraryMoverCheck {
         }
         precondition(blockedReason.contains(MediaFolderCopy.needsManualCleanup))
         precondition(blockedReason.contains(env.destination.path))
+    }
+
+    /// 审查第 3 轮-1：源文件已删、队列和偏好已切走，只是清标记失败，仍算成功。
+    private static func checkMarkerClearFailureIsStillSuccess() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.source.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        var mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        mover.removeItem = { url in
+            if url.lastPathComponent == MediaFolderCopy.inProgressMarkerName {
+                throw NSError(
+                    domain: "media-folder-check",
+                    code: 6,
+                    userInfo: [NSLocalizedDescriptionKey: "marker locked"]
+                )
+            }
+            try FileManager.default.removeItem(at: url)
+        }
+        let result = mover.move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        precondition(result == .success, "清标记失败仍应报告成功，实际 \(result)")
+        if case .failure(let reason) = result {
+            fatalError("不得报失败：\(reason)")
+        }
+        precondition(!FileManager.default.fileExists(atPath: video.path))
+        precondition(FileManager.default.fileExists(atPath: env.destination.appendingPathComponent("keep.mp4").path))
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == env.destination.standardizedFileURL.path)
+        precondition(
+            FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path),
+            "这条路径下标记可以留下"
+        )
+    }
+
+    /// 审查第 3 轮-1：已完成但标记未清时，下次搬移应识别并清掉，不得要求手动清理目标。
+    private static func checkStaleCompletedMarkerAllowsNewMove() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.source.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        MediaFolderPreference.save(env.destination, defaults: env.defaults)
+        try Data("from=\(env.source.path)\nto=\(env.destination.path)\n".utf8)
+            .write(to: MediaFolderMoveMarker.url(beside: env.dataFile))
+
+        let next = env.root.appendingPathComponent("next", isDirectory: true)
+        let result = MediaLibraryMover(defaults: env.defaults, now: { env.now }).move(
+            from: env.source,
+            to: next,
+            dataFile: env.dataFile,
+            items: [],
+            hasActiveDownload: false
+        )
+        precondition(result == .success, "过期标记不得挡住新搬移，实际 \(result)")
+        if case .failure(let reason) = result {
+            fatalError("不得要求手动清理：\(reason)")
+        }
+        precondition(!FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path))
+        precondition(!FileManager.default.fileExists(atPath: video.path))
+        precondition(FileManager.default.fileExists(atPath: next.appendingPathComponent("keep.mp4").path))
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == next.standardizedFileURL.path)
     }
 
     private struct Env {

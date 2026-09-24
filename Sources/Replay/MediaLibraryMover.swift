@@ -47,6 +47,33 @@ enum MediaFolderMoveMarker {
         }
         return MediaFolderCopy.incompleteMove
     }
+
+    /// 偏好已经指向标记里的目标，说明上次搬移已经提交完，只是标记没清掉。
+    static func isStaleCompleted(
+        beside dataFile: URL,
+        defaults: UserDefaults,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard exists(beside: dataFile, fileManager: fileManager),
+              let dest = destination(beside: dataFile, fileManager: fileManager),
+              let saved = MediaFolderPreference.resolve(defaults: defaults) else { return false }
+        return saved.standardizedFileURL.path == dest.standardizedFileURL.path
+    }
+
+    @discardableResult
+    static func clearIfStaleCompleted(
+        beside dataFile: URL,
+        defaults: UserDefaults,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard isStaleCompleted(beside: dataFile, defaults: defaults, fileManager: fileManager) else {
+            return false
+        }
+        let marker = url(beside: dataFile)
+        guard fileManager.fileExists(atPath: marker.path) else { return true }
+        try? fileManager.removeItem(at: marker)
+        return true
+    }
 }
 
 struct MediaLibraryMover {
@@ -70,7 +97,15 @@ struct MediaLibraryMover {
             return .failure(MediaFolderCopy.downloadingBlock)
         }
         if MediaFolderMoveMarker.exists(beside: dataFile, fileManager: fileManager) {
-            return .failure(MediaFolderMoveMarker.incompleteReason(beside: dataFile, fileManager: fileManager))
+            if MediaFolderMoveMarker.clearIfStaleCompleted(
+                beside: dataFile,
+                defaults: defaults,
+                fileManager: fileManager
+            ) {
+                MediaFolderLog.info("cleared stale completed move marker")
+            } else {
+                return .failure(MediaFolderMoveMarker.incompleteReason(beside: dataFile, fileManager: fileManager))
+            }
         }
         let from = source.standardizedFileURL
         let to = destination.standardizedFileURL
@@ -115,7 +150,6 @@ struct MediaLibraryMover {
         let destinationExisted = fileManager.fileExists(atPath: destination.path)
         let previousPreference = defaults.string(forKey: MediaFolderPreference.key)
         var backupURL: URL?
-        var committedMetadata = false
 
         do {
             let files = try listFiles(in: source)
@@ -151,10 +185,11 @@ struct MediaLibraryMover {
             }
             try writeRemappedQueue(items: items, from: source, to: destination, dataFile: dataFile)
             MediaFolderPreference.save(destination, defaults: defaults)
-            committedMetadata = true
 
             let leftoverNames = deleteVerifiedSources(files)
-            try clearMarker(marker)
+            if let markerError = clearMarkerIfPossible(marker) {
+                MediaFolderLog.error("move finished but marker stayed: \(markerError)")
+            }
             if leftoverNames.isEmpty {
                 return .done
             }
@@ -162,11 +197,6 @@ struct MediaLibraryMover {
                 MediaFolderCopy.sourceLeftovers(names: leftoverNames, sourcePath: source.path)
             )
         } catch {
-            if committedMetadata {
-                throw MediaLibraryMoveFailure(
-                    "\(error.localizedDescription)；片库路径已指向新目录，请处理未完成的搬移"
-                )
-            }
             var parts = [error.localizedDescription]
             if let restoreError = restoreQueue(dataFile: dataFile, backupURL: backupURL) {
                 parts.append(restoreError)
