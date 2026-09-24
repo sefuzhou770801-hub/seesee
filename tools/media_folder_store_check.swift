@@ -12,6 +12,7 @@ struct MediaFolderStoreCheck {
         try await checkDisconnectedDestinationMoveDoesNotCreate()
         try await checkIncompleteMarkerRefusesNewMove()
         try await checkStaleCompletedMarkerIsClearedOnLaunch()
+        try await checkInterruptG_LaunchDoesNotTreatAsComplete()
         try await checkPartialDeleteDoesNotClaimSourcesRemain()
         try await checkSettingsMirrorSeesFailureAfterChange()
         print("media_folder_store_check=passed")
@@ -235,20 +236,28 @@ struct MediaFolderStoreCheck {
         }
     }
 
-    /// 审查第 3 轮-1：偏好已指向标记目标时，启动应清掉过期标记，不要提示手动清理。
+    /// 审查第 3 轮-1：源已删完、队列和偏好都已切走，只剩标记时，启动应清掉标记。
     private static func checkStaleCompletedMarkerIsClearedOnLaunch() async throws {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.root) }
 
-        MediaFolderPreference.save(env.mediaFolder, defaults: env.defaults)
-        try Data("from=/old\nto=\(env.mediaFolder.path)\n".utf8)
-            .write(to: MediaFolderMoveMarker.url(beside: env.dataFile))
-        try writeQueue([], to: env.dataFile)
+        let destination = env.root.appendingPathComponent("to", isDirectory: true)
+        let library = try seedStoreLibrary(env)
+        var mover = MediaLibraryMover(defaults: env.defaults)
+        mover.interruptAfter = .afterSourcesDeleted
+        _ = mover.move(
+            from: env.mediaFolder,
+            to: destination,
+            dataFile: env.dataFile,
+            items: library,
+            hasActiveDownload: false
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .completedMarkerLeft)
 
         let store = await MainActor.run {
             QueueStore(
                 dataFile: env.dataFile,
-                mediaFolder: env.mediaFolder,
+                mediaFolder: destination,
                 defaults: env.defaults
             )
         }
@@ -263,6 +272,89 @@ struct MediaFolderStoreCheck {
                 "过期标记应被自动清掉"
             )
         }
+    }
+
+    /// 状态表 g：启动时队列和偏好已切、源文件还在，不得当成完成并清标记。
+    private static func checkInterruptG_LaunchDoesNotTreatAsComplete() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let destination = env.root.appendingPathComponent("to", isDirectory: true)
+        let library = try seedStoreLibrary(env)
+        var mover = MediaLibraryMover(defaults: env.defaults)
+        mover.interruptAfter = .afterPreferenceSaved
+        _ = mover.move(
+            from: env.mediaFolder,
+            to: destination,
+            dataFile: env.dataFile,
+            items: library,
+            hasActiveDownload: false
+        )
+        precondition(
+            MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .committedNeedsCleanup,
+            "启动前必须识别为收尾未完"
+        )
+        for item in library {
+            let name = URL(fileURLWithPath: item.localFilePath!).lastPathComponent
+            precondition(FileManager.default.fileExists(atPath: env.mediaFolder.appendingPathComponent(name).path))
+        }
+
+        let store = await MainActor.run {
+            QueueStore(
+                dataFile: env.dataFile,
+                mediaFolder: destination,
+                defaults: env.defaults
+            )
+        }
+        await MainActor.run {
+            if let message = store.mediaFolderMoveMessage {
+                precondition(!message.contains(MediaFolderCopy.needsManualCleanup), "不得要求手动清理目标，实际 \(message)")
+                precondition(!message.contains("原来的视频都还在"), "不得谎称原文件还在，实际 \(message)")
+            }
+            for item in library {
+                let name = URL(fileURLWithPath: item.localFilePath!).lastPathComponent
+                precondition(
+                    !FileManager.default.fileExists(atPath: env.mediaFolder.appendingPathComponent(name).path),
+                    "启动收尾应补删源文件 \(name)"
+                )
+                precondition(FileManager.default.fileExists(atPath: destination.appendingPathComponent(name).path))
+            }
+            precondition(
+                MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .idle
+                    || !MediaFolderMoveMarker.exists(beside: env.dataFile)
+            )
+        }
+    }
+
+    private static func seedStoreLibrary(_ env: Env) throws -> [WatchItem] {
+        var items: [WatchItem] = []
+        for index in 0..<2 {
+            let id = UUID()
+            let video = env.mediaFolder.appendingPathComponent("\(id.uuidString).mp4")
+            try Data("store-video-\(index)".utf8).write(to: video)
+            items.append(
+                WatchItem(
+                    id: id,
+                    urlString: "https://example.com/\(id.uuidString)",
+                    title: "store-\(index)",
+                    author: "check",
+                    duration: 12,
+                    addedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    watchedAt: nil,
+                    state: .ready,
+                    progress: 1,
+                    progressLabel: "已下载",
+                    localFilePath: video.path,
+                    errorMessage: nil,
+                    playbackPosition: nil,
+                    chapters: nil,
+                    thumbnailFilePath: nil,
+                    subtitleFilePath: nil
+                )
+            )
+        }
+        try writeQueue(items, to: env.dataFile)
+        return items
     }
 
     /// 审查第 2 轮-2：QueueStore 对部分删除用告知文案，不用「原来的视频都还在」。

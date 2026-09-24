@@ -689,9 +689,20 @@ final class QueueStore: ObservableObject {
             return .failure("正在搬移视频")
         }
         if MediaFolderMoveMarker.exists(beside: dataFile) {
-            if MediaFolderMoveMarker.clearIfStaleCompleted(beside: dataFile, defaults: defaults) {
-                MediaFolderLog.info("cleared stale completed move marker")
-            } else {
+            let verdict = MediaFolderMoveRecovery.apply(beside: dataFile, defaults: defaults)
+            switch verdict {
+            case .idle:
+                MediaFolderLog.info("recovered leftover move marker")
+            case .completedMarkerLeft:
+                MediaFolderLog.info("move already complete; leftover marker stayed")
+            case .committedNeedsCleanup:
+                let note = MediaFolderCopy.sourceLeftovers(
+                    names: MediaFolderMoveRecovery.remainingSourceNames(beside: dataFile),
+                    sourcePath: MediaFolderMoveMarker.source(beside: dataFile)?.path ?? mediaFolder.path
+                )
+                mediaFolderMoveMessage = note
+                return .finishedWithSourceLeftovers(note)
+            case .incomplete:
                 let reason = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
                 mediaFolderMoveMessage = reason
                 return .failure(reason)
@@ -756,11 +767,19 @@ final class QueueStore: ObservableObject {
 
     private func applyIncompleteMoveBannerIfNeeded() {
         guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
-        if MediaFolderMoveMarker.clearIfStaleCompleted(beside: dataFile, defaults: defaults) {
-            MediaFolderLog.info("cleared stale completed move marker")
+        let verdict = MediaFolderMoveRecovery.apply(beside: dataFile, defaults: defaults)
+        switch verdict {
+        case .idle, .completedMarkerLeft:
+            MediaFolderLog.info("recovered leftover move marker")
             return
+        case .committedNeedsCleanup:
+            mediaFolderMoveMessage = MediaFolderCopy.sourceLeftovers(
+                names: MediaFolderMoveRecovery.remainingSourceNames(beside: dataFile),
+                sourcePath: MediaFolderMoveMarker.source(beside: dataFile)?.path ?? mediaFolder.path
+            )
+        case .incomplete:
+            mediaFolderMoveMessage = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
         }
-        mediaFolderMoveMessage = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
     }
 
     func refreshMediaFolderConnection() {

@@ -21,6 +21,16 @@ struct MediaLibraryMoverCheck {
         try checkRollbackCleanupFailureKeepsMarker()
         try checkMarkerClearFailureIsStillSuccess()
         try checkStaleCompletedMarkerAllowsNewMove()
+        try checkInterruptA_BeforeStart()
+        try checkInterruptB_AfterMarkerWritten()
+        try checkInterruptC_DuringCopy()
+        try checkInterruptD_AfterVerified()
+        try checkInterruptE_AfterQueueBackup()
+        try checkInterruptF_AfterQueueRemapped()
+        try checkInterruptG_AfterPreferenceSaved()
+        try checkInterruptH_DuringSourceDelete()
+        try checkInterruptI_AfterSourcesDeleted()
+        try checkInterruptJ_AfterMarkerCleared()
         print("media_library_mover_check=passed")
     }
 
@@ -660,18 +670,350 @@ struct MediaLibraryMoverCheck {
         )
     }
 
-    /// 审查第 3 轮-1：已完成但标记未清时，下次搬移应识别并清掉，不得要求手动清理目标。
+    /// 审查第 3 轮-1：源已删完、队列和偏好都已切走，只剩标记时，下次搬移应清掉标记并继续。
     private static func checkStaleCompletedMarkerAllowsNewMove() throws {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.root) }
 
-        let video = env.source.appendingPathComponent("keep.mp4")
-        try Data("video-bytes-one".utf8).write(to: video)
-        MediaFolderPreference.save(env.destination, defaults: env.defaults)
-        try Data("from=\(env.source.path)\nto=\(env.destination.path)\n".utf8)
-            .write(to: MediaFolderMoveMarker.url(beside: env.dataFile))
+        let library = try seedLibrary(env)
+        _ = interruptMove(env, items: library.items, after: .afterSourcesDeleted)
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .completedMarkerLeft)
 
         let next = env.root.appendingPathComponent("next", isDirectory: true)
+        let later = env.now.addingTimeInterval(2)
+        let result = MediaLibraryMover(defaults: env.defaults, now: { later }).move(
+            from: env.destination,
+            to: next,
+            dataFile: env.dataFile,
+            items: remappedItems(library.items, from: env.source, to: env.destination),
+            hasActiveDownload: false
+        )
+        precondition(result == .success, "真正完成后的过期标记不得挡住新搬移，实际 \(result)")
+        precondition(!FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path))
+        for file in library.sourceFiles {
+            precondition(!FileManager.default.fileExists(atPath: file.path))
+            precondition(FileManager.default.fileExists(atPath: next.appendingPathComponent(file.lastPathComponent).path))
+        }
+        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == next.standardizedFileURL.path)
+    }
+
+    /// 状态表 a：还没写标记，重启后无恢复动作。
+    private static func checkInterruptA_BeforeStart() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .idle)
+        precondition(!MediaFolderMoveMarker.exists(beside: env.dataFile))
+        for file in library.sourceFiles {
+            precondition(FileManager.default.fileExists(atPath: file.path))
+        }
+        let after = MediaFolderMoveRecovery.apply(beside: env.dataFile, defaults: env.defaults)
+        precondition(after == .idle)
+        precondition(!MediaFolderMoveMarker.exists(beside: env.dataFile))
+    }
+
+    /// 状态表 b：已写标记、复制未开始。
+    private static func checkInterruptB_AfterMarkerWritten() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterMarkerWritten)
+        precondition(result == .failure("搬移中断"))
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: false,
+            preferenceAtDestination: false,
+            destinationComplete: false,
+            leftoverSourceCount: 2
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .incomplete)
+        applyKeepsIncompleteMarker(env)
+    }
+
+    /// 状态表 c：复制进行中。
+    private static func checkInterruptC_DuringCopy() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterCopyProgress(completed: 1))
+        precondition(result == .failure("搬移中断"))
+        let destCount = destRegularFileCount(env.destination)
+        precondition(destCount == 1, "复制中断后目标应只有部分文件，实际 \(destCount)")
+        precondition(sourceRegularFileCount(env.source) == 2)
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: false,
+            preferenceAtDestination: false,
+            destinationComplete: false,
+            leftoverSourceCount: 2
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .incomplete)
+        applyKeepsIncompleteMarker(env)
+    }
+
+    /// 状态表 d：核对通过，还没备份队列。
+    private static func checkInterruptD_AfterVerified() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterVerified)
+        precondition(result == .failure("搬移中断"))
+        precondition(queueBackupCount(env) == 0)
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: false,
+            preferenceAtDestination: false,
+            destinationComplete: true,
+            leftoverSourceCount: 2
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .incomplete)
+        applyKeepsIncompleteMarker(env)
+    }
+
+    /// 状态表 e：已备份队列，还没改写。
+    private static func checkInterruptE_AfterQueueBackup() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterQueueBackedUp)
+        precondition(result == .failure("搬移中断"))
+        precondition(queueBackupCount(env) == 1)
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: false,
+            preferenceAtDestination: false,
+            destinationComplete: true,
+            leftoverSourceCount: 2
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .incomplete)
+        applyKeepsIncompleteMarker(env)
+    }
+
+    /// 状态表 f：队列已改写，偏好未写。
+    private static func checkInterruptF_AfterQueueRemapped() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterQueueRemapped)
+        precondition(result == .failure("搬移中断"))
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: true,
+            preferenceAtDestination: false,
+            destinationComplete: true,
+            leftoverSourceCount: 2
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .incomplete)
+        applyKeepsIncompleteMarker(env)
+    }
+
+    /// 状态表 g：队列和偏好已切走，源文件还没删。第 4 轮审查复现场景。
+    private static func checkInterruptG_AfterPreferenceSaved() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterPreferenceSaved)
+        precondition(result == .failure("搬移中断"))
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: true,
+            preferenceAtDestination: true,
+            destinationComplete: true,
+            leftoverSourceCount: 2
+        )
+        precondition(
+            MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .committedNeedsCleanup,
+            "源文件未删不得判成已完成"
+        )
+        precondition(MediaFolderMoveMarker.exists(beside: env.dataFile))
+
+        let later = env.now.addingTimeInterval(2)
+        let refused = MediaLibraryMover(defaults: env.defaults, now: { later }).move(
+            from: env.destination,
+            to: env.root.appendingPathComponent("next", isDirectory: true),
+            dataFile: env.dataFile,
+            items: remappedItems(library.items, from: env.source, to: env.destination),
+            hasActiveDownload: false
+        )
+        if case .failure(let reason) = refused {
+            fatalError("收尾应先补删源文件，不得报失败：\(reason)")
+        }
+        for file in library.sourceFiles {
+            precondition(!FileManager.default.fileExists(atPath: file.path), "收尾后源文件应被补删")
+        }
+    }
+
+    /// 状态表 h：部分源文件已删。
+    private static func checkInterruptH_DuringSourceDelete() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterSourceDeleteProgress(deleted: 1))
+        precondition(result == .failure("搬移中断"))
+        precondition(sourceRegularFileCount(env.source) == 1, "删源中断后应剩 1 个源文件")
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: true,
+            preferenceAtDestination: true,
+            destinationComplete: true,
+            leftoverSourceCount: 1
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .committedNeedsCleanup)
+        let after = MediaFolderMoveRecovery.apply(beside: env.dataFile, defaults: env.defaults)
+        precondition(after == .idle || after == .completedMarkerLeft)
+        precondition(sourceRegularFileCount(env.source) == 0)
+        if after == .idle {
+            precondition(!MediaFolderMoveMarker.exists(beside: env.dataFile))
+        }
+    }
+
+    /// 状态表 i：源已删完，标记还在。
+    private static func checkInterruptI_AfterSourcesDeleted() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = interruptMove(env, items: library.items, after: .afterSourcesDeleted)
+        precondition(result == .failure("搬移中断"))
+        assertInterruptedFacts(
+            env,
+            library: library,
+            queueAtDestination: true,
+            preferenceAtDestination: true,
+            destinationComplete: true,
+            leftoverSourceCount: 0
+        )
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .completedMarkerLeft)
+        let after = MediaFolderMoveRecovery.apply(beside: env.dataFile, defaults: env.defaults)
+        precondition(after == .idle)
+        precondition(!MediaFolderMoveMarker.exists(beside: env.dataFile))
+        for file in library.sourceFiles {
+            precondition(!FileManager.default.fileExists(atPath: file.path))
+        }
+    }
+
+    /// 状态表 j：标记已清，正常完成。
+    private static func checkInterruptJ_AfterMarkerCleared() throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+        let library = try seedLibrary(env)
+        let result = MediaLibraryMover(defaults: env.defaults, now: { env.now }).move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: library.items,
+            hasActiveDownload: false
+        )
+        precondition(result == .success)
+        precondition(!MediaFolderMoveMarker.exists(beside: env.dataFile))
+        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .idle)
+        precondition(MediaFolderMoveRecovery.apply(beside: env.dataFile, defaults: env.defaults) == .idle)
+        for file in library.sourceFiles {
+            precondition(!FileManager.default.fileExists(atPath: file.path))
+            precondition(
+                FileManager.default.fileExists(atPath: env.destination.appendingPathComponent(file.lastPathComponent).path)
+            )
+        }
+    }
+
+    private struct SeededLibrary {
+        let items: [WatchItem]
+        let sourceFiles: [URL]
+    }
+
+    private static func seedLibrary(_ env: Env) throws -> SeededLibrary {
+        var items: [WatchItem] = []
+        var files: [URL] = []
+        for index in 0..<2 {
+            let id = UUID()
+            let video = env.source.appendingPathComponent("\(id.uuidString).mp4")
+            try Data("video-bytes-\(index)".utf8).write(to: video)
+            files.append(video)
+            items.append(sampleItem(id: id, local: video.path, thumbnail: nil, subtitle: nil))
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(items).write(to: env.dataFile)
+        return SeededLibrary(items: items, sourceFiles: files)
+    }
+
+    private static func interruptMove(
+        _ env: Env,
+        items: [WatchItem],
+        after: MediaLibraryMoveInterrupt
+    ) -> MediaLibraryMoveResult {
+        var mover = MediaLibraryMover(defaults: env.defaults, now: { env.now })
+        mover.interruptAfter = after
+        return mover.move(
+            from: env.source,
+            to: env.destination,
+            dataFile: env.dataFile,
+            items: items,
+            hasActiveDownload: false
+        )
+    }
+
+    private static func remappedItems(
+        _ items: [WatchItem],
+        from source: URL,
+        to destination: URL
+    ) -> [WatchItem] {
+        let remap = ReplayMigrationResult(
+            applicationSupport: destination,
+            mediaFolder: destination,
+            movedFromMediaFolder: source
+        )
+        var copy = items
+        for index in copy.indices {
+            copy[index].localFilePath = remap.remappedMediaPath(copy[index].localFilePath)
+            copy[index].thumbnailFilePath = remap.remappedMediaPath(copy[index].thumbnailFilePath)
+            copy[index].subtitleFilePath = remap.remappedMediaPath(copy[index].subtitleFilePath)
+        }
+        return copy
+    }
+
+    private static func loadItems(_ env: Env) throws -> [WatchItem] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([WatchItem].self, from: Data(contentsOf: env.dataFile))
+    }
+
+    private static func regularFileCount(_ root: URL) -> Int {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else { return 0 }
+        var count = 0
+        for case let file as URL in enumerator {
+            if file.lastPathComponent == ".DS_Store" { continue }
+            if (try? file.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private static func destRegularFileCount(_ root: URL) -> Int { regularFileCount(root) }
+    private static func sourceRegularFileCount(_ root: URL) -> Int { regularFileCount(root) }
+
+    private static func queueBackupCount(_ env: Env) -> Int {
+        let parent = env.dataFile.deletingLastPathComponent()
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []
+        return names.filter { $0.hasPrefix("queue.json.bak-") }.count
+    }
+
+    private static func applyKeepsIncompleteMarker(_ env: Env) {
+        let after = MediaFolderMoveRecovery.apply(beside: env.dataFile, defaults: env.defaults)
+        precondition(after == .incomplete, "未完成节点不得自动放行，实际 \(after)")
+        precondition(MediaFolderMoveMarker.exists(beside: env.dataFile))
+        let next = env.root.appendingPathComponent("retry-\(UUID().uuidString)", isDirectory: true)
         let result = MediaLibraryMover(defaults: env.defaults, now: { env.now }).move(
             from: env.source,
             to: next,
@@ -679,14 +1021,64 @@ struct MediaLibraryMoverCheck {
             items: [],
             hasActiveDownload: false
         )
-        precondition(result == .success, "过期标记不得挡住新搬移，实际 \(result)")
-        if case .failure(let reason) = result {
-            fatalError("不得要求手动清理：\(reason)")
+        guard case .failure(let reason) = result else {
+            fatalError("未完成必须拒绝新搬移，实际 \(result)")
         }
-        precondition(!FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path))
-        precondition(!FileManager.default.fileExists(atPath: video.path))
-        precondition(FileManager.default.fileExists(atPath: next.appendingPathComponent("keep.mp4").path))
-        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == next.standardizedFileURL.path)
+        precondition(
+            reason.contains(MediaFolderCopy.needsManualCleanup) || reason.contains(MediaFolderCopy.incompleteMove),
+            "拒绝文案应说明未完成，实际 \(reason)"
+        )
+        precondition(MediaFolderMoveMarker.exists(beside: env.dataFile))
+    }
+
+    private static func assertInterruptedFacts(
+        _ env: Env,
+        library: SeededLibrary,
+        queueAtDestination: Bool,
+        preferenceAtDestination: Bool,
+        destinationComplete: Bool,
+        leftoverSourceCount: Int
+    ) {
+        precondition(MediaFolderMoveMarker.exists(beside: env.dataFile), "中断后必须留下进行中标记")
+        let markedDest = MediaFolderMoveMarker.destination(beside: env.dataFile)
+        let markedSource = MediaFolderMoveMarker.source(beside: env.dataFile)
+        precondition(markedDest?.standardizedFileURL.path == env.destination.standardizedFileURL.path)
+        precondition(markedSource?.standardizedFileURL.path == env.source.standardizedFileURL.path)
+
+        let items = (try? loadItems(env)) ?? []
+        precondition(items.count == library.items.count)
+        let destPrefix = env.destination.standardizedFileURL.path
+        let sourcePrefix = env.source.standardizedFileURL.path
+        for item in items {
+            guard let path = item.localFilePath else { continue }
+            if queueAtDestination {
+                precondition(path.hasPrefix(destPrefix), "队列应已指向目标：\(path)")
+            } else {
+                precondition(path.hasPrefix(sourcePrefix), "队列应仍指向源：\(path)")
+            }
+        }
+
+        let pref = env.defaults.string(forKey: MediaFolderPreference.key)
+        if preferenceAtDestination {
+            precondition(pref == env.destination.standardizedFileURL.path, "偏好应已指向目标，实际 \(pref ?? "nil")")
+        } else {
+            precondition(pref == nil || pref == env.source.standardizedFileURL.path, "偏好不得提前指向目标，实际 \(pref ?? "nil")")
+        }
+
+        precondition(
+            sourceRegularFileCount(env.source) == leftoverSourceCount,
+            "源文件残留数不对，实际 \(sourceRegularFileCount(env.source))"
+        )
+        if destinationComplete {
+            precondition(destRegularFileCount(env.destination) == library.sourceFiles.count)
+            for file in library.sourceFiles {
+                let destFile = env.destination.appendingPathComponent(file.lastPathComponent)
+                precondition(FileManager.default.fileExists(atPath: destFile.path), "目标缺少 \(file.lastPathComponent)")
+                if FileManager.default.fileExists(atPath: file.path) {
+                    precondition(shasum(destFile) == shasum(file), "目标与源内容不一致：\(file.lastPathComponent)")
+                }
+            }
+        }
     }
 
     private struct Env {
