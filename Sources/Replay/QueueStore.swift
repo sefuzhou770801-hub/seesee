@@ -25,6 +25,15 @@ private final class QueuePersistenceWriter {
         }
     }
 
+    /// 丢掉还没落盘的写入：发现 queue.json 读不出来时用，免得延迟写入随后把它覆盖。
+    func cancelPending() {
+        queue.sync {
+            pendingWork?.cancel()
+            pendingWork = nil
+            pendingItems = nil
+        }
+    }
+
     func flush(_ items: [WatchItem]) {
         queue.sync {
             pendingWork?.cancel()
@@ -83,7 +92,19 @@ final class QueueStore: ObservableObject {
     private var waitingForNetwork: Set<UUID> = []
     private var waitingForPower: Set<UUID> = []
     private var powerCancellationIDs: Set<UUID> = []
-    let mediaFolder: URL
+    @Published private(set) var mediaFolder: URL
+    @Published private(set) var isMediaFolderDisconnected = false
+    @Published private(set) var mediaFolderMoveProgress: MediaLibraryMoveProgress?
+    @Published private(set) var mediaFolderMoveMessage: String?
+    /// 切换后旧位置还留着的那份片库；用户在访达里删空后不再显示。
+    @Published private(set) var previousMediaFolder: URL?
+    private var isMovingMediaFolder = false
+    /// queue.json 在但读不出来或解码失败：无法判断，本次运行不写它，也不更改片库位置。
+    private var isQueueFileUnreadable = false
+    private let defaults: UserDefaults
+    private let resolveMountedVolumes: () -> [URL]
+    private let volumesRoot: URL
+    private var volumeObservers: [NSObjectProtocol] = []
 
     init() {
         let fileManager = FileManager.default
@@ -100,17 +121,29 @@ final class QueueStore: ObservableObject {
         let applicationSupport = migration.applicationSupport
         dataFile = applicationSupport.appendingPathComponent("queue.json")
         persistenceWriter = QueuePersistenceWriter(dataFile: dataFile)
-        mediaFolder = migration.mediaFolder
+        defaults = .standard
+        volumesRoot = MediaFolderAvailability.defaultVolumesRoot
+        resolveMountedVolumes = { MediaFolderAvailability.liveMountedVolumes() }
+        // 上次更改位置没做完就先退回旧位置，再按（可能已退回的）偏好定片库目录。
+        let recovery = MediaFolderMoveRecovery.rollBackPendingMove(
+            beside: dataFile,
+            defaults: .standard,
+            mountedVolumes: MediaFolderAvailability.liveMountedVolumes()
+        )
+        mediaFolder = MediaFolderPreference.resolve(defaults: .standard) ?? migration.mediaFolder
         channelWatch = ChannelWatchStore(
             dataFile: applicationSupport.appendingPathComponent("subscriptions.json"),
             downloader: downloader
         )
         try? fileManager.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
-        try? fileManager.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        refreshMediaFolderConnection()
+        createMediaFolderIfConnected()
         load()
+        showRecoveryOutcome(recovery)
+        refreshPreviousMediaFolder()
         migrateQueueToNewestFirstIfNeeded()
 
-        if migration.didMoveMediaFolder {
+        if migration.didMoveMediaFolder, MediaFolderPreference.resolve(defaults: .standard) == nil {
             for index in items.indices {
                 items[index].localFilePath = migration.remappedMediaPath(items[index].localFilePath)
                 items[index].thumbnailFilePath = migration.remappedMediaPath(items[index].thumbnailFilePath)
@@ -118,28 +151,47 @@ final class QueueStore: ObservableObject {
             }
         }
 
-        for index in items.indices where items[index].state == .downloading {
-            items[index].state = .queued
-            items[index].progressLabel = "等待恢复"
-        }
+        markInterruptedDownloads()
         save()
         selection = queueItems.first?.id ?? archivedItems.first?.id
 
         wireMonitors()
+        scheduleLaunchMediaFolderMoveIfNeeded()
     }
 
     /// 测试用最小注入初始化：直接指定数据文件与媒体目录，跳过目录迁移与监控接线，
     /// 便于在隔离目录里通过真实 `remove()` 验证删除接线。生产一律走无参 `init()`。
-    init(dataFile: URL, mediaFolder: URL) {
+    init(
+        dataFile: URL,
+        mediaFolder: URL,
+        defaults: UserDefaults = .standard,
+        mountedVolumeURLs: [URL]? = nil,
+        volumesRoot: URL = MediaFolderAvailability.defaultVolumesRoot
+    ) {
         self.dataFile = dataFile
         self.persistenceWriter = QueuePersistenceWriter(dataFile: dataFile)
+        self.defaults = defaults
+        self.volumesRoot = volumesRoot
+        self.resolveMountedVolumes = {
+            if let mountedVolumeURLs { return mountedVolumeURLs }
+            return MediaFolderAvailability.liveMountedVolumes()
+        }
+        let recovery = MediaFolderMoveRecovery.rollBackPendingMove(
+            beside: dataFile,
+            defaults: defaults,
+            mountedVolumes: mountedVolumeURLs ?? MediaFolderAvailability.liveMountedVolumes(),
+            volumesRoot: volumesRoot
+        )
         self.mediaFolder = mediaFolder
         self.channelWatch = ChannelWatchStore(
             dataFile: dataFile.deletingLastPathComponent().appendingPathComponent("subscriptions.json"),
             downloader: downloader
         )
-        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        refreshMediaFolderConnection()
+        createMediaFolderIfConnected()
         load()
+        showRecoveryOutcome(recovery)
+        refreshPreviousMediaFolder()
     }
 
     private func wireMonitors() {
@@ -172,6 +224,7 @@ final class QueueStore: ObservableObject {
             }
         }
         powerMonitor.start()
+        observeVolumeChanges()
 
         let resumable = items.filter { $0.state == .queued }.map(\.id)
         let missingChapterMetadata = items.filter { $0.state == .ready && $0.chapters == nil }.map(\.id)
@@ -243,7 +296,10 @@ final class QueueStore: ObservableObject {
             let duplicateDetail = extra.isEmpty ? "" : " · \(extra)"
             let detail: String
             let systemImage: String
-            if powerMonitor.isLowPowerModeEnabled {
+            if isMediaFolderDisconnected {
+                detail = "\(MediaFolderCopy.disconnected)\(duplicateDetail)"
+                systemImage = "externaldrive.badge.xmark"
+            } else if powerMonitor.isLowPowerModeEnabled {
                 detail = "已排队，等低电量模式关闭后开始\(duplicateDetail)"
                 systemImage = "battery.25"
             } else if networkMonitor.isOnline {
@@ -369,15 +425,20 @@ final class QueueStore: ObservableObject {
         save()
         startDownload(for: item.id)
         let current = self.item(with: item.id)
+        let isDisconnected = current?.progressLabel == MediaFolderCopy.disconnected
         let isPowerPaused = current?.progressLabel == "低电量模式已暂停"
         let isOnline = networkMonitor.isOnline
         if showsNotice {
             showIntakeNotice(
                 title: "已加入队列",
-                detail: isPowerPaused
-                    ? "低电量模式开启中，已暂停"
-                    : (isOnline ? "正在下载 \(item.title)" : "等待网络连接"),
-                systemImage: isPowerPaused ? "battery.25" : (isOnline ? "arrow.down.circle.fill" : "wifi.slash")
+                detail: isDisconnected
+                    ? MediaFolderCopy.disconnected
+                    : (isPowerPaused
+                        ? "低电量模式开启中，已暂停"
+                        : (isOnline ? "正在下载 \(item.title)" : "等待网络连接")),
+                systemImage: isDisconnected
+                    ? "externaldrive.badge.xmark"
+                    : (isPowerPaused ? "battery.25" : (isOnline ? "arrow.down.circle.fill" : "wifi.slash"))
             )
         }
         if activatesApp { NSApp.activate(ignoringOtherApps: true) }
@@ -397,6 +458,7 @@ final class QueueStore: ObservableObject {
         retryAttempts[id] = 0
         waitingForNetwork.remove(id)
         waitingForPower.remove(id)
+        if holdDownloadIfMediaFolderUnavailable(id) { return }
         guard !powerMonitor.isLowPowerModeEnabled else {
             waitForPower(id)
             return
@@ -410,6 +472,7 @@ final class QueueStore: ObservableObject {
     }
 
     private func beginDownload(for id: UUID, isRetry: Bool) {
+        if holdDownloadIfMediaFolderUnavailable(id) { return }
         if powerMonitor.isLowPowerModeEnabled {
             waitForPower(id)
             return
@@ -520,6 +583,7 @@ final class QueueStore: ObservableObject {
     }
 
     func refreshThumbnail(for id: UUID) {
+        guard !isMediaFolderDisconnected, !isMovingMediaFolder else { return }
         guard !thumbnailRefreshes.contains(id),
               let existing = item(with: id),
               existing.state == .ready,
@@ -542,6 +606,7 @@ final class QueueStore: ObservableObject {
     }
 
     func refreshSubtitle(for id: UUID) {
+        guard !isMediaFolderDisconnected, !isMovingMediaFolder else { return }
         guard !subtitleRefreshes.contains(id),
               let existing = item(with: id),
               existing.state == .ready,
@@ -569,6 +634,10 @@ final class QueueStore: ObservableObject {
     /// - Parameter completion: 主线程回调扫描后的有效路径（含幂等未变时），供当前界面立即重载字幕。
     func rescanLocalSubtitle(for id: UUID, completion: ((String) -> Void)? = nil) {
         guard let existing = item(with: id) else { return }
+        guard !isMediaFolderDisconnected else {
+            completion?(existing.subtitleFilePath ?? "")
+            return
+        }
         guard existing.state == .ready else {
             completion?(existing.subtitleFilePath ?? "")
             return
@@ -625,7 +694,216 @@ final class QueueStore: ObservableObject {
     }
 
     func revealMediaFolder() {
+        guard !isMediaFolderDisconnected else { return }
         NSWorkspace.shared.open(mediaFolder)
+    }
+
+    func presentMediaFolderPicker() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = MediaFolderCopy.changeButton
+        panel.directoryURL = isMediaFolderDisconnected ? nil : mediaFolder
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        _ = moveMediaFolder(to: url)
+    }
+
+    @discardableResult
+    func moveMediaFolder(to destination: URL, mover: MediaLibraryMover? = nil) -> MediaLibraryMoveResult {
+        guard !isMovingMediaFolder else {
+            return .failure("正在搬移视频")
+        }
+        // 按磁盘上当前的 queue.json 判断，不信启动时读的结果：运行中被改坏时，
+        // 先 flush 会拿内存里的旧队列把它覆盖掉，之后的搬移就看不出它坏过。
+        guard !isQueueFileUnreadable, queueFileDecodesOnDisk() else {
+            if FileManager.default.fileExists(atPath: dataFile.path) {
+                isQueueFileUnreadable = true
+                persistenceWriter.cancelPending()
+            }
+            mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.queueUnreadable)
+            MediaFolderLog.error("move refused: queue.json unreadable on disk")
+            return .failure(MediaFolderCopy.queueUnreadable)
+        }
+        isMovingMediaFolder = true
+        mediaFolderMoveMessage = nil
+        mediaFolderMoveProgress = nil
+        defer { isMovingMediaFolder = false }
+
+        flushPendingSaves()
+        let previous = mediaFolder
+        let used = mover ?? MediaLibraryMover(
+            defaults: defaults,
+            mountedVolumes: resolveMountedVolumes(),
+            volumesRoot: volumesRoot
+        )
+        let result = used.move(
+            from: mediaFolder,
+            to: destination,
+            dataFile: dataFile,
+            hasActiveDownload: items.contains(where: { $0.state == .downloading })
+        ) { [weak self] progress in
+            self?.mediaFolderMoveProgress = progress
+        }
+        mediaFolderMoveProgress = nil
+
+        switch result {
+        case .success:
+            defaults.set(previous.standardizedFileURL.path, forKey: Self.previousMediaFolderKey)
+            mediaFolder = destination.standardizedFileURL
+            load()
+            refreshMediaFolderConnection()
+            refreshPreviousMediaFolder()
+            MediaFolderLog.info("move succeeded: \(destination.path); old copy kept at \(previous.path)")
+        case .noOp:
+            MediaFolderLog.info("move skipped: destination is the current folder")
+        case .failure(let reason):
+            mediaFolderMoveMessage = MediaFolderCopy.failure(reason)
+            MediaFolderLog.error("move failed: \(reason)")
+        }
+        return result
+    }
+
+    private func queueFileDecodesOnDisk() -> Bool {
+        guard let data = try? Data(contentsOf: dataFile) else { return false }
+        return MediaFolderMoveRecovery.decodeQueue(data) != nil
+    }
+
+    private func showRecoveryOutcome(_ outcome: MediaFolderMoveRecoveryOutcome) {
+        switch outcome {
+        case .nothingPending:
+            break
+        case .rolledBack:
+            mediaFolderMoveMessage = MediaFolderCopy.pendingMoveRolledBack
+            MediaFolderLog.info("rolled back unfinished move")
+        case .needsAttention(let reason):
+            mediaFolderMoveMessage = reason
+            MediaFolderLog.error("unfinished move needs attention: \(reason)")
+        }
+    }
+
+    static let previousMediaFolderKey = "MediaFolderPreviousPath"
+
+    /// 旧位置还在、里面还有文件时才显示；已删空或就是当前位置时清掉记录。
+    func refreshPreviousMediaFolder() {
+        guard let path = defaults.string(forKey: Self.previousMediaFolderKey) else {
+            previousMediaFolder = nil
+            return
+        }
+        let folder = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        if MediaFolderAvailability.isDisconnected(folder, mountedVolumes: resolveMountedVolumes(), volumesRoot: volumesRoot) {
+            previousMediaFolder = nil
+            return
+        }
+        guard folder.path != mediaFolder.standardizedFileURL.path, Self.containsAnyFile(folder) else {
+            defaults.removeObject(forKey: Self.previousMediaFolderKey)
+            previousMediaFolder = nil
+            return
+        }
+        previousMediaFolder = folder
+    }
+
+    func revealPreviousMediaFolder() {
+        guard let previousMediaFolder else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([previousMediaFolder])
+    }
+
+    private static func containsAnyFile(_ folder: URL) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        for case let file as URL in enumerator {
+            if (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                return true
+            }
+        }
+        return false
+    }
+
+    func refreshMediaFolderConnection() {
+        let disconnected = MediaFolderAvailability.isDisconnected(
+            mediaFolder,
+            mountedVolumes: resolveMountedVolumes(),
+            volumesRoot: volumesRoot
+        )
+        let changed = disconnected != isMediaFolderDisconnected
+        isMediaFolderDisconnected = disconnected
+        guard changed else { return }
+        if disconnected {
+            markQueuedAsDisconnected()
+        } else {
+            resumeDisconnectedDownloads()
+        }
+    }
+
+    private func createMediaFolderIfConnected() {
+        guard !isMediaFolderDisconnected else { return }
+        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+    }
+
+    private func markInterruptedDownloads() {
+        if isMediaFolderDisconnected {
+            markQueuedAsDisconnected()
+            return
+        }
+        for index in items.indices where items[index].state == .downloading {
+            items[index].state = .queued
+            items[index].progressLabel = "等待恢复"
+        }
+    }
+
+    private func markQueuedAsDisconnected() {
+        for index in items.indices where items[index].state == .downloading || items[index].state == .queued {
+            items[index].state = .queued
+            items[index].progressLabel = MediaFolderCopy.disconnected
+        }
+    }
+
+    private func resumeDisconnectedDownloads() {
+        let ids = items
+            .filter { $0.state == .queued && $0.progressLabel == MediaFolderCopy.disconnected }
+            .map(\.id)
+        for id in ids {
+            startDownload(for: id)
+        }
+    }
+
+    @discardableResult
+    private func holdDownloadIfMediaFolderUnavailable(_ id: UUID) -> Bool {
+        if isMediaFolderDisconnected {
+            update(id) {
+                $0.state = .queued
+                $0.progressLabel = MediaFolderCopy.disconnected
+            }
+            save()
+            return true
+        }
+        if isMovingMediaFolder {
+            return true
+        }
+        return false
+    }
+
+    private func observeVolumeChanges() {
+        let center = NSWorkspace.shared.notificationCenter
+        let names = [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification]
+        for name in names {
+            volumeObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refreshMediaFolderConnection()
+                }
+            })
+        }
+    }
+
+    private func scheduleLaunchMediaFolderMoveIfNeeded() {
+        guard let destination = MediaFolderLaunchArguments.moveDestination() else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.moveMediaFolder(to: destination)
+        }
     }
 
     func revealLocalFile(_ id: UUID) {
@@ -893,6 +1171,7 @@ final class QueueStore: ObservableObject {
     }
 
     private func startWaitingDownloadsIfPossible() {
+        guard !isMediaFolderDisconnected, !isMovingMediaFolder else { return }
         guard networkMonitor.isOnline, !powerMonitor.isLowPowerModeEnabled else { return }
         let availableSlots = maximumConcurrentDownloads - activeDownloadCount
         guard availableSlots > 0 else { return }
@@ -928,17 +1207,26 @@ final class QueueStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: dataFile) else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        items = (try? decoder.decode([WatchItem].self, from: data)) ?? []
+        guard FileManager.default.fileExists(atPath: dataFile.path) else { return }
+        guard let data = try? Data(contentsOf: dataFile),
+              let decoded = MediaFolderMoveRecovery.decodeQueue(data) else {
+            // 读不出来就当作无法判断：列表先空着，但不拿空列表覆盖原文件。
+            isQueueFileUnreadable = true
+            items = []
+            mediaFolderMoveMessage = MediaFolderCopy.queueUnreadable
+            return
+        }
+        isQueueFileUnreadable = false
+        items = decoded
     }
 
     private func save() {
+        guard !isQueueFileUnreadable else { return }
         persistenceWriter.schedule(items)
     }
 
     func flushPendingSaves() {
+        guard !isQueueFileUnreadable else { return }
         persistenceWriter.flush(items)
     }
 }

@@ -156,7 +156,12 @@ final class DigestSettingsModel: ObservableObject {
 
     let defaults: UserDefaults
     let environment: [String: String]
-    let mediaFolder: URL?
+    @Published var mediaFolder: URL?
+    @Published var isMediaFolderDisconnected = false
+    @Published var mediaFolderMoveProgress: MediaLibraryMoveProgress?
+    @Published var mediaFolderMoveFailure: String?
+    @Published var previousMediaFolder: URL?
+    var onChangeMediaFolder: (() -> Void)?
     var debounce: TimeInterval = 1.0
     private let verifier: DigestKeyVerifier
     private var isLoading = false
@@ -167,11 +172,13 @@ final class DigestSettingsModel: ObservableObject {
         defaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         mediaFolder: URL? = nil,
+        isMediaFolderDisconnected: Bool = false,
         verifier: @escaping DigestKeyVerifier = { await DigestKeyVerification.verify(provider: $0, key: $1) }
     ) {
         self.defaults = defaults
         self.environment = environment
         self.mediaFolder = mediaFolder
+        self.isMediaFolderDisconnected = isMediaFolderDisconnected
         self.verifier = verifier
         let resolved = DigestProvider.resolve(defaults: defaults, environment: environment)
         provider = resolved
@@ -244,6 +251,13 @@ final class DigestSettingsModel: ObservableObject {
     func revealMediaFolder() {
         guard let mediaFolder else { return }
         NSWorkspace.shared.activateFileViewerSelecting([mediaFolder])
+    }
+
+    var previousMediaPathText: String { previousMediaFolder.map(DigestSettingsCopy.displayPath) ?? "" }
+
+    func revealPreviousMediaFolder() {
+        guard let previousMediaFolder else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([previousMediaFolder])
     }
 
     /// 等当前这轮验证结束（检查与证明图用）。

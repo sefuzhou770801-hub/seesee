@@ -74,6 +74,60 @@ struct DigestSettingsView: View {
                         .accessibilityLabel(model.mediaPathText)
                     Spacer(minLength: 8)
                     secondaryButton(DigestSettingsCopy.revealTitle, action: model.revealMediaFolder)
+                    secondaryButton(MediaFolderCopy.changeButton, action: { model.onChangeMediaFolder?() })
+                }
+                if model.isMediaFolderDisconnected {
+                    row("") {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(MediaFolderCopy.disconnected)
+                                .font(.system(size: 12))
+                                .foregroundStyle(OpenMyChrome.rec)
+                                .accessibilityLabel(MediaFolderCopy.disconnected)
+                            Text(model.mediaPathText)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(OpenMyChrome.muted)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+                if model.previousMediaFolder != nil {
+                    row("") {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(MediaFolderCopy.previousFolderKept)
+                                .font(.system(size: 12))
+                                .foregroundStyle(OpenMyChrome.muted)
+                            Text(model.previousMediaPathText)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(OpenMyChrome.muted)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(MediaFolderCopy.previousFolderKept) \(model.previousMediaPathText)")
+                        Spacer(minLength: 8)
+                        secondaryButton(MediaFolderCopy.revealInFinder, action: model.revealPreviousMediaFolder)
+                    }
+                }
+                if let progress = model.mediaFolderMoveProgress {
+                    row("") {
+                        Text(progress.text)
+                            .font(.system(size: 12))
+                            .foregroundStyle(OpenMyChrome.muted)
+                            .accessibilityLabel(progress.text)
+                        Spacer(minLength: 0)
+                    }
+                }
+                if let failure = model.mediaFolderMoveFailure {
+                    row("") {
+                        Text(failure)
+                            .font(.system(size: 12))
+                            .foregroundStyle(OpenMyChrome.rec)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityLabel(failure)
+                        Spacer(minLength: 0)
+                    }
                 }
             }
         }
