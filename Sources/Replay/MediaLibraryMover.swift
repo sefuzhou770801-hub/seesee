@@ -16,340 +16,202 @@ enum MediaFolderLog {
 
 enum MediaLibraryMoveResult: Equatable {
     case success
-    case finishedWithSourceLeftovers(String)
     case noOp
     case failure(String)
 }
 
+/// 生产代码里的中断钩子：到了这一步直接抛出，不走失败清理，留下与进程在此刻退出相同的现场。
 enum MediaLibraryMoveInterrupt: Equatable {
-    case afterMarkerWritten
     case afterCopyProgress(completed: Int)
-    case afterVerified
-    case afterQueueBackedUp
+    case atVerifyFailure
     case afterQueueRemapped
     case afterPreferenceSaved
-    case afterSourceDeleteProgress(deleted: Int)
-    case afterSourcesDeleted
 }
 
-enum MediaLibraryMoveVerdict: Equatable {
-    case idle
-    case incomplete
-    case committedNeedsCleanup
-    case completedMarkerLeft
-}
+/// 搬移记录：复制开始前写在 queue.json 旁边，切换的最后一步才删除。
+/// 它还在就说明上次搬移没有做完；恢复时按它把一切退回旧位置。
+struct MediaFolderMoveJournal: Codable, Equatable {
+    static let fileName = "media-folder-move.inprogress"
 
-enum MediaFolderMoveMarker {
+    var source: String
+    var destination: String
+    var createdDestination: Bool
+    /// 复制前记下的清单：本次要写进新位置的文件（相对路径），新位置原本已有的同名同内容文件不在其中。
+    var copiedFiles: [String]
+    /// 本次在新位置里新建的子目录（相对路径）。
+    var createdDirectories: [String]
+    /// 切换前 queue.json 的备份文件名，与 queue.json 同目录。
+    /// 恢复时已经把 queue.json 退回旧内容后置空，之后应用照常写队列，重试清理时不再拿备份覆盖。
+    var queueBackup: String?
+    var previousPreference: String?
+
     static func url(beside dataFile: URL) -> URL {
-        dataFile.deletingLastPathComponent().appendingPathComponent(MediaFolderCopy.inProgressMarkerName)
+        dataFile.deletingLastPathComponent().appendingPathComponent(fileName)
     }
 
-    static func exists(beside dataFile: URL, fileManager: FileManager = .default) -> Bool {
-        fileManager.fileExists(atPath: url(beside: dataFile).path)
+    /// 没有记录时返回 nil；有记录但读不出来时抛错。
+    static func read(beside dataFile: URL) throws -> MediaFolderMoveJournal? {
+        let url = url(beside: dataFile)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(MediaFolderMoveJournal.self, from: Data(contentsOf: url))
     }
 
-    static func destination(beside dataFile: URL, fileManager: FileManager = .default) -> URL? {
-        pathValue(beside: dataFile, prefix: "to=", fileManager: fileManager)
-    }
-
-    static func source(beside dataFile: URL, fileManager: FileManager = .default) -> URL? {
-        pathValue(beside: dataFile, prefix: "from=", fileManager: fileManager)
-    }
-
-    private static func pathValue(
-        beside dataFile: URL,
-        prefix: String,
-        fileManager: FileManager
-    ) -> URL? {
-        guard let text = try? String(contentsOf: url(beside: dataFile), encoding: .utf8) else { return nil }
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard line.hasPrefix(prefix) else { continue }
-            let path = String(line.dropFirst(prefix.count))
-            guard !path.isEmpty else { return nil }
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        return nil
-    }
-
-    static func incompleteReason(beside dataFile: URL, fileManager: FileManager = .default) -> String {
-        if let dest = destination(beside: dataFile, fileManager: fileManager) {
-            return MediaFolderCopy.leftoverDestinationNeedsCleanup(dest.standardizedFileURL.path)
-        }
-        return MediaFolderCopy.incompleteMove
-    }
-
-    /// 旧入口：只在整表判定为「已完成只剩标记」时才是过期完成。
-    static func isStaleCompleted(
-        beside dataFile: URL,
-        defaults: UserDefaults,
-        fileManager: FileManager = .default
-    ) -> Bool {
-        MediaFolderMoveRecovery.inspect(
-            beside: dataFile,
-            defaults: defaults,
-            fileManager: fileManager
-        ) == .completedMarkerLeft
-    }
-
-    @discardableResult
-    static func clearIfStaleCompleted(
-        beside dataFile: URL,
-        defaults: UserDefaults,
-        fileManager: FileManager = .default
-    ) -> Bool {
-        guard isStaleCompleted(beside: dataFile, defaults: defaults, fileManager: fileManager) else {
-            return false
-        }
-        let marker = url(beside: dataFile)
-        guard fileManager.fileExists(atPath: marker.path) else { return true }
-        try? fileManager.removeItem(at: marker)
-        return !fileManager.fileExists(atPath: marker.path)
+    func write(beside dataFile: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(self).write(to: Self.url(beside: dataFile), options: .atomic)
     }
 }
 
+enum MediaFolderMoveRecoveryOutcome: Equatable {
+    case nothingPending
+    case rolledBack
+    /// 没能退干净，记录保留，下次启动或下次更改位置时再试；附给用户看的原因。
+    case needsAttention(String)
+}
+
+/// 搬移没做完时退回旧位置。启动时和搬移当场失败时走的都是这一段。
+/// 旧位置的文件从头到尾不碰；只删复制前清单里、本次写进新位置的文件。
 enum MediaFolderMoveRecovery {
-    static func inspect(
+    static func rollBackPendingMove(
         beside dataFile: URL,
         defaults: UserDefaults,
-        fileManager: FileManager = .default
-    ) -> MediaLibraryMoveVerdict {
-        guard MediaFolderMoveMarker.exists(beside: dataFile, fileManager: fileManager) else {
-            return .idle
+        mountedVolumes: [URL],
+        volumesRoot: URL = MediaFolderAvailability.defaultVolumesRoot,
+        removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    ) -> MediaFolderMoveRecoveryOutcome {
+        let fileManager = FileManager.default
+        let journal: MediaFolderMoveJournal
+        do {
+            guard let found = try MediaFolderMoveJournal.read(beside: dataFile) else { return .nothingPending }
+            journal = found
+        } catch {
+            return .needsAttention(MediaFolderCopy.pendingMoveUnreadable)
         }
-        guard let dest = MediaFolderMoveMarker.destination(beside: dataFile, fileManager: fileManager),
-              let source = MediaFolderMoveMarker.source(beside: dataFile, fileManager: fileManager) else {
-            return .incomplete
-        }
-        let items = loadQueue(dataFile)
-        let pref = MediaFolderPreference.resolve(defaults: defaults)
-        let prefMatches = pref?.standardizedFileURL.path == dest.standardizedFileURL.path
-        let queueMatches = allQueuePathsPointTo(dest, items: items, source: source)
-        let destVerified = destinationHoldsVerifiedCopies(
-            source: source,
-            destination: dest,
-            items: items,
-            fileManager: fileManager
-        )
-        let sourcesGone = correspondingSourcesGone(
-            source: source,
-            destination: dest,
-            items: items,
-            fileManager: fileManager
-        )
-        if prefMatches && queueMatches && destVerified && sourcesGone {
-            return .completedMarkerLeft
-        }
-        if prefMatches && queueMatches && destVerified && !sourcesGone {
-            return .committedNeedsCleanup
-        }
-        return .incomplete
-    }
 
-    static func remainingSourceNames(
-        beside dataFile: URL,
-        fileManager: FileManager = .default
-    ) -> [String] {
-        guard let dest = MediaFolderMoveMarker.destination(beside: dataFile, fileManager: fileManager),
-              let source = MediaFolderMoveMarker.source(beside: dataFile, fileManager: fileManager) else {
-            return []
+        // queue.json 读不出来或解码失败：无法判断，什么都不写、不删。
+        guard let queueData = try? Data(contentsOf: dataFile), decodeQueue(queueData) != nil else {
+            return .needsAttention(MediaFolderCopy.queueUnreadable)
         }
-        return listFiles(in: source, fileManager: fileManager).compactMap { file in
-            let destFile = dest.appendingPathComponent(relativePath(of: file, to: source))
-            guard fileManager.fileExists(atPath: destFile.path) else { return nil }
-            return file.lastPathComponent
-        }
-    }
-
-    @discardableResult
-    static func apply(
-        beside dataFile: URL,
-        defaults: UserDefaults,
-        fileManager: FileManager = .default
-    ) -> MediaLibraryMoveVerdict {
-        let verdict = inspect(beside: dataFile, defaults: defaults, fileManager: fileManager)
-        switch verdict {
-        case .idle, .incomplete:
-            return verdict
-        case .committedNeedsCleanup:
-            finishSourceCleanup(beside: dataFile, fileManager: fileManager)
-            let next = inspect(beside: dataFile, defaults: defaults, fileManager: fileManager)
-            if next == .completedMarkerLeft {
-                return clearCompletedMarker(beside: dataFile, fileManager: fileManager)
+        // 备份只在改写 queue.json 之前写成，所以备份在、内容又不同，说明 queue.json 已被改写，退回备份。
+        if let backupName = journal.queueBackup {
+            let backup = dataFile.deletingLastPathComponent().appendingPathComponent(backupName)
+            if fileManager.fileExists(atPath: backup.path) {
+                guard let backupData = try? Data(contentsOf: backup), decodeQueue(backupData) != nil else {
+                    return .needsAttention(MediaFolderCopy.queueUnreadable)
+                }
+                if backupData != queueData {
+                    do {
+                        try backupData.write(to: dataFile, options: .atomic)
+                    } catch {
+                        return .needsAttention(MediaFolderCopy.pendingMoveNotRestored(error.localizedDescription))
+                    }
+                }
             }
-            return next
-        case .completedMarkerLeft:
-            return clearCompletedMarker(beside: dataFile, fileManager: fileManager)
         }
+
+        let source = URL(fileURLWithPath: journal.source, isDirectory: true).standardizedFileURL
+        let destination = URL(fileURLWithPath: journal.destination, isDirectory: true).standardizedFileURL
+        if MediaFolderPreference.resolve(defaults: defaults)?.standardizedFileURL.path == destination.path {
+            if let previous = journal.previousPreference {
+                defaults.set(previous, forKey: MediaFolderPreference.key)
+            } else {
+                defaults.removeObject(forKey: MediaFolderPreference.key)
+            }
+        }
+        if journal.queueBackup != nil {
+            var restored = journal
+            restored.queueBackup = nil
+            do {
+                try restored.write(beside: dataFile)
+            } catch {
+                return .needsAttention(MediaFolderCopy.pendingMoveNotRestored(error.localizedDescription))
+            }
+        }
+
+        // 到这里 queue.json 和偏好都已回到旧位置，应用可以照常用旧片库；下面只清新位置。
+        guard !MediaFolderPaths.overlap(source, destination) else {
+            return .needsAttention(MediaFolderCopy.pendingMoveUnreadable)
+        }
+        if MediaFolderAvailability.isDisconnected(destination, mountedVolumes: mountedVolumes, volumesRoot: volumesRoot) {
+            return .needsAttention(MediaFolderCopy.pendingDestinationDisconnected(destination.path))
+        }
+        var failures: [String] = []
+        for relative in journal.copiedFiles {
+            guard let file = MediaFolderPaths.child(relative, of: destination) else { continue }
+            guard fileManager.fileExists(atPath: file.path) else { continue }
+            do {
+                try removeItem(file)
+            } catch {
+                failures.append("\(relative)：\(error.localizedDescription)")
+            }
+        }
+        // 目录只删本次新建且已经空了的，里面有任何东西就留着。
+        let directories = journal.createdDirectories
+            .compactMap { MediaFolderPaths.child($0, of: destination) }
+            .sorted { $0.pathComponents.count > $1.pathComponents.count }
+        for directory in directories where isEmptyDirectory(directory) {
+            try? removeItem(directory)
+        }
+        if journal.createdDestination, isEmptyDirectory(destination) {
+            try? removeItem(destination)
+        }
+        guard failures.isEmpty else {
+            return .needsAttention(
+                MediaFolderCopy.pendingCleanupFailed(path: destination.path, reason: failures.joined(separator: "；"))
+            )
+        }
+        do {
+            try removeItem(MediaFolderMoveJournal.url(beside: dataFile))
+        } catch {
+            return .needsAttention(MediaFolderCopy.pendingMoveNotRestored(error.localizedDescription))
+        }
+        return .rolledBack
     }
 
-    private static func clearCompletedMarker(
-        beside dataFile: URL,
-        fileManager: FileManager
-    ) -> MediaLibraryMoveVerdict {
-        let marker = MediaFolderMoveMarker.url(beside: dataFile)
-        guard fileManager.fileExists(atPath: marker.path) else { return .idle }
-        try? fileManager.removeItem(at: marker)
-        return fileManager.fileExists(atPath: marker.path) ? .completedMarkerLeft : .idle
-    }
-
-    private static func finishSourceCleanup(
-        beside dataFile: URL,
-        fileManager: FileManager
-    ) {
-        guard let dest = MediaFolderMoveMarker.destination(beside: dataFile, fileManager: fileManager),
-              let source = MediaFolderMoveMarker.source(beside: dataFile, fileManager: fileManager) else {
-            return
-        }
-        for file in listFiles(in: source, fileManager: fileManager) {
-            let destFile = dest.appendingPathComponent(relativePath(of: file, to: source))
-            guard fileManager.fileExists(atPath: destFile.path) else { continue }
-            guard let matched = try? sameContent(file, destFile, fileManager: fileManager), matched else { continue }
-            try? fileManager.removeItem(at: file)
-        }
-    }
-
-    private static func loadQueue(_ dataFile: URL) -> [WatchItem] {
-        guard let data = try? Data(contentsOf: dataFile) else { return [] }
+    static func decodeQueue(_ data: Data) -> [WatchItem]? {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([WatchItem].self, from: data)) ?? []
+        return try? decoder.decode([WatchItem].self, from: data)
     }
 
-    private static func allQueuePathsPointTo(
-        _ destination: URL,
-        items: [WatchItem],
-        source: URL
-    ) -> Bool {
-        let destPrefix = pathPrefix(destination)
-        let sourcePrefix = pathPrefix(source)
-        for item in items {
-            for raw in [item.localFilePath, item.thumbnailFilePath, item.subtitleFilePath] {
-                guard let raw, !raw.isEmpty else { continue }
-                let path = URL(fileURLWithPath: raw).standardizedFileURL.path
-                if path.hasPrefix(sourcePrefix) { return false }
-                if path.hasPrefix(destPrefix) { continue }
-            }
-        }
-        return true
+    private static func isEmptyDirectory(_ url: URL) -> Bool {
+        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path) else { return false }
+        return contents.isEmpty
     }
+}
 
-    private static func destinationHoldsVerifiedCopies(
-        source: URL,
-        destination: URL,
-        items: [WatchItem],
-        fileManager: FileManager
-    ) -> Bool {
-        let sourceFiles = listFiles(in: source, fileManager: fileManager)
-        if sourceFiles.isEmpty {
-            return queueMediaFilesExist(items, under: destination, fileManager: fileManager)
-        }
-        for file in sourceFiles {
-            let destFile = destination.appendingPathComponent(relativePath(of: file, to: source))
-            guard fileManager.fileExists(atPath: destFile.path) else { return false }
-            guard let matched = try? sameContent(file, destFile, fileManager: fileManager), matched else {
-                return false
-            }
-        }
-        return queueMediaFilesExist(items, under: destination, fileManager: fileManager)
-    }
-
-    private static func correspondingSourcesGone(
-        source: URL,
-        destination: URL,
-        items: [WatchItem],
-        fileManager: FileManager
-    ) -> Bool {
-        for destFile in listFiles(in: destination, fileManager: fileManager) {
-            let sourceFile = source.appendingPathComponent(relativePath(of: destFile, to: destination))
-            if fileManager.fileExists(atPath: sourceFile.path) { return false }
-        }
-        let destPrefix = pathPrefix(destination)
-        let sourcePrefix = pathPrefix(source)
-        for item in items {
-            for raw in [item.localFilePath, item.thumbnailFilePath, item.subtitleFilePath] {
-                guard let raw, !raw.isEmpty else { continue }
-                let path = URL(fileURLWithPath: raw).standardizedFileURL.path
-                guard path.hasPrefix(destPrefix) else { continue }
-                let relative = String(path.dropFirst(destPrefix.count))
-                if fileManager.fileExists(atPath: source.appendingPathComponent(relative).path) {
-                    return false
-                }
-                if fileManager.fileExists(atPath: URL(fileURLWithPath: sourcePrefix + relative).path) {
-                    return false
-                }
-            }
-        }
-        return true
-    }
-
-    private static func queueMediaFilesExist(
-        _ items: [WatchItem],
-        under destination: URL,
-        fileManager: FileManager
-    ) -> Bool {
-        let destPrefix = pathPrefix(destination)
-        for item in items {
-            for raw in [item.localFilePath, item.thumbnailFilePath, item.subtitleFilePath] {
-                guard let raw, !raw.isEmpty else { continue }
-                let path = URL(fileURLWithPath: raw).standardizedFileURL.path
-                guard path.hasPrefix(destPrefix) else { continue }
-                if !fileManager.fileExists(atPath: path) { return false }
-            }
-        }
-        return true
-    }
-
-    private static func pathPrefix(_ url: URL) -> String {
-        let path = url.standardizedFileURL.path
-        return path.hasSuffix("/") ? path : path + "/"
-    }
-
-    private static func relativePath(of file: URL, to root: URL) -> String {
-        let rootPath = root.standardizedFileURL.path
+enum MediaFolderPaths {
+    static func relativePath(of file: URL, to root: URL) -> String {
+        let prefix = directoryPrefix(root)
         let filePath = file.standardizedFileURL.path
-        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
         guard filePath.hasPrefix(prefix) else { return file.lastPathComponent }
         return String(filePath.dropFirst(prefix.count))
     }
 
-    private static func listFiles(in root: URL, fileManager: FileManager) -> [URL] {
-        guard let enumerator = fileManager.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
-            options: []
-        ) else { return [] }
-        var files: [URL] = []
-        for case let file as URL in enumerator {
-            if file.lastPathComponent == ".DS_Store" { continue }
-            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
-            if values?.isDirectory == true { continue }
-            if values?.isRegularFile == true {
-                files.append(file.standardizedFileURL)
-            }
-        }
-        return files
+    /// 两个目录相同，或一个在另一个里面。
+    static func overlap(_ lhs: URL, _ rhs: URL) -> Bool {
+        let left = lhs.standardizedFileURL.path
+        let right = rhs.standardizedFileURL.path
+        return left == right || left.hasPrefix(directoryPrefix(rhs)) || right.hasPrefix(directoryPrefix(lhs))
     }
 
-    private static func sameContent(_ lhs: URL, _ rhs: URL, fileManager: FileManager) throws -> Bool {
-        let left = try fileManager.attributesOfItem(atPath: lhs.path)[.size] as? NSNumber
-        let right = try fileManager.attributesOfItem(atPath: rhs.path)[.size] as? NSNumber
-        guard let left, let right, left == right else { return false }
-        return try sha256(lhs) == sha256(rhs)
+    /// 把记录里的相对路径接回根目录；空的、绝对的或带 `..` 的一律不认。
+    static func child(_ relative: String, of root: URL) -> URL? {
+        let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
+        guard !relative.isEmpty, !relative.hasPrefix("/"),
+              !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return nil }
+        return root.appendingPathComponent(relative)
     }
 
-    private static func sha256(_ url: URL) throws -> String {
-        var hasher = SHA256()
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        while true {
-            let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
-            if chunk.isEmpty { break }
-            hasher.update(data: chunk)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    private static func directoryPrefix(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        return path.hasSuffix("/") ? path : path + "/"
     }
 }
 
+/// 更改片库位置：复制到新位置 → 逐文件核对大小与 SHA-256 → 改写 queue.json 与偏好，切换过去。
+/// 旧位置的文件一个都不删；切换完成后旧位置还留着一份，删不删由用户自己决定。
 struct MediaLibraryMover {
     var fileManager: FileManager = .default
     var copyItem: (URL, URL) throws -> Void = { try FileManager.default.copyItem(at: $0, to: $1) }
@@ -364,38 +226,14 @@ struct MediaLibraryMover {
         from source: URL,
         to destination: URL,
         dataFile: URL,
-        items: [WatchItem],
         hasActiveDownload: Bool,
         onProgress: ((MediaLibraryMoveProgress) -> Void)? = nil
     ) -> MediaLibraryMoveResult {
         if hasActiveDownload {
             return .failure(MediaFolderCopy.downloadingBlock)
         }
-        if MediaFolderMoveMarker.exists(beside: dataFile, fileManager: fileManager) {
-            let verdict = MediaFolderMoveRecovery.apply(
-                beside: dataFile,
-                defaults: defaults,
-                fileManager: fileManager
-            )
-            switch verdict {
-            case .idle:
-                MediaFolderLog.info("recovered leftover move marker")
-            case .completedMarkerLeft:
-                MediaFolderLog.info("move already complete; leftover marker stayed")
-            case .committedNeedsCleanup:
-                let leftoverSource = MediaFolderMoveMarker.source(beside: dataFile, fileManager: fileManager)
-                return .finishedWithSourceLeftovers(
-                    MediaFolderCopy.sourceLeftovers(
-                        names: MediaFolderMoveRecovery.remainingSourceNames(
-                            beside: dataFile,
-                            fileManager: fileManager
-                        ),
-                        sourcePath: leftoverSource?.path ?? source.path
-                    )
-                )
-            case .incomplete:
-                return .failure(MediaFolderMoveMarker.incompleteReason(beside: dataFile, fileManager: fileManager))
-            }
+        if case .needsAttention(let reason) = rollBack(dataFile: dataFile) {
+            return .failure(reason)
         }
         let from = source.standardizedFileURL
         let to = destination.standardizedFileURL
@@ -408,145 +246,140 @@ struct MediaLibraryMover {
         if MediaFolderAvailability.isDisconnected(to, mountedVolumes: mountedVolumes, volumesRoot: volumesRoot) {
             return .failure(MediaFolderCopy.destinationDisconnected)
         }
+        if MediaFolderPaths.overlap(from, to) {
+            return .failure(MediaFolderCopy.destinationOverlapsLibrary)
+        }
 
+        // 准备阶段只读不写：任何一项不满足就原样返回。
+        let plan: MovePlan
         do {
-            switch try performMove(
-                from: from,
-                to: to,
-                dataFile: dataFile,
-                items: items,
-                onProgress: onProgress
-            ) {
-            case .done:
-                return .success
-            case .doneWithSourceLeftovers(let note):
-                return .finishedWithSourceLeftovers(note)
-            }
-        } catch is MediaLibraryMoveInterrupted {
-            return .failure("搬移中断")
+            plan = try makePlan(from: from, to: to, dataFile: dataFile)
         } catch {
             return .failure(error.localizedDescription)
         }
-    }
-
-    private func performMove(
-        from source: URL,
-        to destination: URL,
-        dataFile: URL,
-        items: [WatchItem],
-        onProgress: ((MediaLibraryMoveProgress) -> Void)?
-    ) throws -> PerformOutcome {
-        let marker = MediaFolderMoveMarker.url(beside: dataFile)
-        try writeMarker(marker, from: source, to: destination)
-        try interruptIfNeeded(.afterMarkerWritten)
-        var copied: [URL] = []
-        let destinationExisted = fileManager.fileExists(atPath: destination.path)
-        let previousPreference = defaults.string(forKey: MediaFolderPreference.key)
-        var backupURL: URL?
 
         do {
-            let files = try listFiles(in: source)
-            try assertNoConflicts(files: files, source: source, destination: destination)
-
-            if !destinationExisted {
-                try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-            }
-
-            let total = files.count
-            for (index, file) in files.enumerated() {
-                let relative = relativePath(of: file, to: source)
-                let destFile = destination.appendingPathComponent(relative)
-                let destParent = destFile.deletingLastPathComponent()
-                if !fileManager.fileExists(atPath: destParent.path) {
-                    try fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
-                }
-                if fileManager.fileExists(atPath: destFile.path) {
-                    onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
-                    try interruptIfNeeded(.afterCopyProgress(completed: index + 1))
-                    continue
-                }
-                copied.append(destFile)
-                try copyItem(file, destFile)
-                onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
-                try interruptIfNeeded(.afterCopyProgress(completed: index + 1))
-            }
-
-            try verify(files: files, source: source, destination: destination)
-            try interruptIfNeeded(.afterVerified)
-
-            if fileManager.fileExists(atPath: dataFile.path) {
-                let backup = backupURLForQueue(dataFile)
-                try fileManager.copyItem(at: dataFile, to: backup)
-                backupURL = backup
-            }
-            try interruptIfNeeded(.afterQueueBackedUp)
-            try writeRemappedQueue(items: items, from: source, to: destination, dataFile: dataFile)
-            try interruptIfNeeded(.afterQueueRemapped)
-            MediaFolderPreference.save(destination, defaults: defaults)
-            try interruptIfNeeded(.afterPreferenceSaved)
-
-            let leftoverNames = try deleteVerifiedSources(files)
-            try interruptIfNeeded(.afterSourcesDeleted)
-            if let markerError = clearMarkerIfPossible(marker) {
-                MediaFolderLog.error("move finished but marker stayed: \(markerError)")
-            }
-            if leftoverNames.isEmpty {
-                return .done
-            }
-            return .doneWithSourceLeftovers(
-                MediaFolderCopy.sourceLeftovers(names: leftoverNames, sourcePath: source.path)
-            )
+            try execute(plan, dataFile: dataFile, onProgress: onProgress)
+            return .success
         } catch is MediaLibraryMoveInterrupted {
-            throw MediaLibraryMoveInterrupted()
+            return .failure(MediaFolderCopy.interrupted)
         } catch {
-            var parts = [error.localizedDescription]
-            if let restoreError = restoreQueue(dataFile: dataFile, backupURL: backupURL) {
-                parts.append(restoreError)
+            let reason = error.localizedDescription
+            if case .needsAttention(let note) = rollBack(dataFile: dataFile) {
+                return .failure("\(reason)；\(note)")
             }
-            restorePreference(previousPreference)
-            let rollbackError = rollback(copied: copied, destination: destination, destinationExisted: destinationExisted)
-            if let rollbackError {
-                parts.append(rollbackError)
-            }
-            let destDirty = rollbackError != nil
-                || copied.contains { fileManager.fileExists(atPath: $0.path) }
-            if destDirty {
-                throw MediaLibraryMoveFailure(
-                    MediaFolderCopy.rollbackLeftResidue(
-                        path: destination.path,
-                        reason: parts.joined(separator: "；")
-                    )
-                )
-            }
-            if let markerError = clearMarkerIfPossible(marker) {
-                parts.append(markerError)
-            }
-            throw MediaLibraryMoveFailure(parts.joined(separator: "；"))
+            return .failure(reason)
         }
     }
 
-    private func assertNoConflicts(files: [URL], source: URL, destination: URL) throws {
-        for file in files {
-            let destFile = destination.appendingPathComponent(relativePath(of: file, to: source))
-            guard fileManager.fileExists(atPath: destFile.path) else { continue }
-            if try !sameContent(file, destFile) {
-                throw MediaLibraryMoveFailure(
-                    "目标目录已有同名文件，内容不同，没有覆盖：\(destFile.lastPathComponent)"
-                )
-            }
-        }
+    private func rollBack(dataFile: URL) -> MediaFolderMoveRecoveryOutcome {
+        MediaFolderMoveRecovery.rollBackPendingMove(
+            beside: dataFile,
+            defaults: defaults,
+            mountedVolumes: mountedVolumes,
+            volumesRoot: volumesRoot,
+            removeItem: removeItem
+        )
     }
 
-    private func verify(files: [URL], source: URL, destination: URL) throws {
+    private struct MovePlan {
+        var source: URL
+        var destination: URL
+        var files: [URL]
+        var queueData: Data
+        var items: [WatchItem]
+        var backupName: String
+        var journal: MediaFolderMoveJournal
+    }
+
+    private func makePlan(from source: URL, to destination: URL, dataFile: URL) throws -> MovePlan {
+        guard let queueData = try? Data(contentsOf: dataFile),
+              let items = MediaFolderMoveRecovery.decodeQueue(queueData) else {
+            throw MediaLibraryMoveFailure(MediaFolderCopy.queueUnreadable)
+        }
+        let files = try listFiles(in: source)
+        var copiedFiles: [String] = []
+        var createdDirectories: Set<String> = []
         for file in files {
-            let destFile = destination.appendingPathComponent(relativePath(of: file, to: source))
-            guard fileManager.fileExists(atPath: destFile.path) else {
-                throw MediaLibraryMoveFailure("核对失败，目标缺少 \(file.lastPathComponent)")
+            let relative = MediaFolderPaths.relativePath(of: file, to: source)
+            let destFile = destination.appendingPathComponent(relative)
+            if fileManager.fileExists(atPath: destFile.path) {
+                guard try sameContent(file, destFile) else {
+                    throw MediaLibraryMoveFailure("目标目录已有同名文件，内容不同，没有覆盖：\(destFile.lastPathComponent)")
+                }
+                continue
             }
-            if try !sameContent(file, destFile) {
+            copiedFiles.append(relative)
+            var parent = (relative as NSString).deletingLastPathComponent
+            while !parent.isEmpty, !fileManager.fileExists(atPath: destination.appendingPathComponent(parent).path) {
+                createdDirectories.insert(parent)
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+        }
+        let backupName = unusedBackupName(beside: dataFile)
+        let journal = MediaFolderMoveJournal(
+            source: source.path,
+            destination: destination.path,
+            createdDestination: !fileManager.fileExists(atPath: destination.path),
+            copiedFiles: copiedFiles,
+            createdDirectories: createdDirectories.sorted(),
+            queueBackup: backupName,
+            previousPreference: defaults.string(forKey: MediaFolderPreference.key)
+        )
+        return MovePlan(
+            source: source,
+            destination: destination,
+            files: files,
+            queueData: queueData,
+            items: items,
+            backupName: backupName,
+            journal: journal
+        )
+    }
+
+    private func execute(
+        _ plan: MovePlan,
+        dataFile: URL,
+        onProgress: ((MediaLibraryMoveProgress) -> Void)?
+    ) throws {
+        try plan.journal.write(beside: dataFile)
+
+        // 复制：只写清单里的文件，新位置原本已有的同名同内容文件不动。
+        try fileManager.createDirectory(at: plan.destination, withIntermediateDirectories: true)
+        let pending = Set(plan.journal.copiedFiles)
+        let total = plan.files.count
+        for (index, file) in plan.files.enumerated() {
+            let relative = MediaFolderPaths.relativePath(of: file, to: plan.source)
+            if pending.contains(relative) {
+                let destFile = plan.destination.appendingPathComponent(relative)
+                try fileManager.createDirectory(
+                    at: destFile.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try copyItem(file, destFile)
+            }
+            onProgress?(MediaLibraryMoveProgress(completed: index + 1, total: total))
+            try interruptIfNeeded(.afterCopyProgress(completed: index + 1))
+        }
+
+        // 核对：每个文件大小一致且 SHA-256 一致。
+        for file in plan.files {
+            let destFile = plan.destination.appendingPathComponent(MediaFolderPaths.relativePath(of: file, to: plan.source))
+            let matched = fileManager.fileExists(atPath: destFile.path) ? try sameContent(file, destFile) : false
+            if !matched {
+                try interruptIfNeeded(.atVerifyFailure)
                 throw MediaLibraryMoveFailure("核对失败，\(file.lastPathComponent) 复制后内容不一致")
             }
         }
+
+        // 切换：先备份 queue.json，再改写路径，再写偏好，最后删掉搬移记录。
+        let backup = dataFile.deletingLastPathComponent().appendingPathComponent(plan.backupName)
+        try plan.queueData.write(to: backup, options: .atomic)
+        try writeRemappedQueue(plan.items, from: plan.source, to: plan.destination, dataFile: dataFile)
+        try interruptIfNeeded(.afterQueueRemapped)
+        MediaFolderPreference.save(plan.destination, defaults: defaults)
+        try interruptIfNeeded(.afterPreferenceSaved)
+        try removeItem(MediaFolderMoveJournal.url(beside: dataFile))
     }
 
     private func sameContent(_ lhs: URL, _ rhs: URL) throws -> Bool {
@@ -557,10 +390,6 @@ struct MediaLibraryMover {
     }
 
     private func fileSize(_ url: URL) throws -> UInt64 {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey])
-        if let size = values.fileSize {
-            return UInt64(size)
-        }
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
         guard let size = attributes[.size] as? NSNumber else {
             throw MediaLibraryMoveFailure("读不到文件大小：\(url.lastPathComponent)")
@@ -621,26 +450,24 @@ struct MediaLibraryMover {
         return files
     }
 
-    private func relativePath(of file: URL, to root: URL) -> String {
-        let rootPath = root.standardizedFileURL.path
-        let filePath = file.standardizedFileURL.path
-        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-        guard filePath.hasPrefix(prefix) else { return file.lastPathComponent }
-        return String(filePath.dropFirst(prefix.count))
-    }
-
-    private func backupURLForQueue(_ dataFile: URL) -> URL {
+    private func unusedBackupName(beside dataFile: URL) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let stamp = formatter.string(from: now())
-        return dataFile.deletingLastPathComponent()
-            .appendingPathComponent("queue.json.bak-\(stamp)")
+        let base = "queue.json.bak-\(formatter.string(from: now()))"
+        let folder = dataFile.deletingLastPathComponent()
+        var name = base
+        var suffix = 1
+        while fileManager.fileExists(atPath: folder.appendingPathComponent(name).path) {
+            name = "\(base)-\(suffix)"
+            suffix += 1
+        }
+        return name
     }
 
     private func writeRemappedQueue(
-        items: [WatchItem],
+        _ items: [WatchItem],
         from source: URL,
         to destination: URL,
         dataFile: URL
@@ -659,97 +486,13 @@ struct MediaLibraryMover {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(remapped)
-        try data.write(to: dataFile, options: .atomic)
-    }
-
-    private func deleteVerifiedSources(_ files: [URL]) throws -> [String] {
-        var leftovers: [String] = []
-        var deleted = 0
-        for file in files {
-            do {
-                try removeItem(file)
-                deleted += 1
-                try interruptIfNeeded(.afterSourceDeleteProgress(deleted: deleted))
-            } catch is MediaLibraryMoveInterrupted {
-                throw MediaLibraryMoveInterrupted()
-            } catch {
-                leftovers.append(file.lastPathComponent)
-            }
-        }
-        return leftovers
+        try encoder.encode(remapped).write(to: dataFile, options: .atomic)
     }
 
     private func interruptIfNeeded(_ step: MediaLibraryMoveInterrupt) throws {
         guard interruptAfter == step else { return }
         throw MediaLibraryMoveInterrupted()
     }
-
-    private func rollback(copied: [URL], destination: URL, destinationExisted: Bool) -> String? {
-        var failures: [String] = []
-        for file in copied {
-            guard fileManager.fileExists(atPath: file.path) else { continue }
-            do {
-                try removeItem(file)
-            } catch {
-                failures.append("\(file.lastPathComponent)：\(error.localizedDescription)")
-            }
-        }
-        if !destinationExisted, fileManager.fileExists(atPath: destination.path) {
-            do {
-                try removeItem(destination)
-            } catch {
-                failures.append("目标目录：\(error.localizedDescription)")
-            }
-        }
-        guard !failures.isEmpty else { return nil }
-        return "回滚目标文件没有完成：\(failures.joined(separator: "；"))"
-    }
-
-    private func writeMarker(_ marker: URL, from source: URL, to destination: URL) throws {
-        let body = "from=\(source.path)\nto=\(destination.path)\n"
-        try Data(body.utf8).write(to: marker, options: .atomic)
-    }
-
-    private func clearMarker(_ marker: URL) throws {
-        guard fileManager.fileExists(atPath: marker.path) else { return }
-        try removeItem(marker)
-    }
-
-    private func clearMarkerIfPossible(_ marker: URL) -> String? {
-        do {
-            try clearMarker(marker)
-            return nil
-        } catch {
-            return "未能清除进行中标记：\(error.localizedDescription)"
-        }
-    }
-
-    private func restoreQueue(dataFile: URL, backupURL: URL?) -> String? {
-        guard let backupURL, fileManager.fileExists(atPath: backupURL.path) else { return nil }
-        do {
-            if fileManager.fileExists(atPath: dataFile.path) {
-                try removeItem(dataFile)
-            }
-            try fileManager.copyItem(at: backupURL, to: dataFile)
-            return nil
-        } catch {
-            return "恢复 queue.json 没有完成：\(error.localizedDescription)"
-        }
-    }
-
-    private func restorePreference(_ previous: String?) {
-        if let previous {
-            defaults.set(previous, forKey: MediaFolderPreference.key)
-        } else {
-            defaults.removeObject(forKey: MediaFolderPreference.key)
-        }
-    }
-}
-
-private enum PerformOutcome {
-    case done
-    case doneWithSourceLeftovers(String)
 }
 
 private struct MediaLibraryMoveInterrupted: Error {}

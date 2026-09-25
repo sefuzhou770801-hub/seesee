@@ -6,9 +6,13 @@ enum MediaFolderCopy {
     static let downloadingBlock = "有视频正在下载，下载完成后再更改存放位置"
     static let sourceDisconnected = "片库存放位置未连接，无法搬移"
     static let destinationDisconnected = "目标存放位置未连接"
-    static let incompleteMove = "上次搬移未完成"
-    static let inProgressMarkerName = "media-folder-move.inprogress"
-    static let needsManualCleanup = "需要手动清理"
+    static let destinationOverlapsLibrary = "新位置不能放在当前片库里面，也不能包含当前片库"
+    static let queueUnreadable = "queue.json 读不出来，无法判断片库状态，没有改动任何文件"
+    static let interrupted = "搬移中断"
+    static let previousFolderKept = "旧位置还留着一份"
+    static let revealInFinder = "在访达中显示"
+    static let pendingMoveRolledBack = "上次更改存放位置没有完成，仍在使用原来的位置"
+    static let pendingMoveUnreadable = "上次更改存放位置的记录读不出来，没有改动任何文件"
 
     static func progress(completed: Int, total: Int) -> String {
         "正在搬移视频（已完成 \(completed) / \(total)）"
@@ -18,16 +22,16 @@ enum MediaFolderCopy {
         "搬移没有完成，原来的视频都还在：\(reason)"
     }
 
-    static func leftoverDestinationNeedsCleanup(_ path: String) -> String {
-        "上次搬移未完成，目标目录可能留有未清理的残余文件，\(needsManualCleanup) \(path) 才能重试"
+    static func pendingMoveNotRestored(_ reason: String) -> String {
+        "上次更改存放位置没有完成，退回原来的位置时出错：\(reason)"
     }
 
-    static func rollbackLeftResidue(path: String, reason: String) -> String {
-        "\(reason)。目标目录可能留有未清理的残余文件，\(needsManualCleanup) \(path) 才能重试"
+    static func pendingDestinationDisconnected(_ path: String) -> String {
+        "\(pendingMoveRolledBack)。新位置 \(path) 未连接，接上后会清掉那里复制了一半的文件"
     }
 
-    static func sourceLeftovers(names: [String], sourcePath: String) -> String {
-        "搬移已经完成，但有 \(names.count) 个原文件没能自动清除（\(names.joined(separator: "、"))），可以手动删除 \(sourcePath)"
+    static func pendingCleanupFailed(path: String, reason: String) -> String {
+        "\(pendingMoveRolledBack)。新位置 \(path) 里复制了一半的文件没能清掉：\(reason)"
     }
 }
 

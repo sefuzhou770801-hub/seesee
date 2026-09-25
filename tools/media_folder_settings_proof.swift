@@ -5,6 +5,7 @@ import SwiftUI
 struct MediaFolderSettingsProof {
     static let connectedPath = "/tmp/media-folder-settings-connected.png"
     static let disconnectedPath = "/tmp/media-folder-settings-disconnected.png"
+    static let switchedPath = "/tmp/media-folder-settings-switched.png"
 
     @MainActor
     static func main() async {
@@ -35,7 +36,21 @@ struct MediaFolderSettingsProof {
         )
         let disconnectedHeight = render(model: disconnected, path: disconnectedPath)
         precondition(disconnectedHeight <= 520, "未连接设置页高度 \(disconnectedHeight) 超出预期")
-        print("media_folder_settings_proof=passed connected=\(connectedPath) disconnected=\(disconnectedPath)")
+
+        let switched = DigestSettingsModel(
+            defaults: defaults,
+            environment: [:],
+            mediaFolder: URL(fileURLWithPath: "/Volumes/移动ssd/seesee", isDirectory: true),
+            verifier: { _, _ in .valid }
+        )
+        switched.previousMediaFolder = media
+        precondition(switched.previousMediaPathText == DigestSettingsCopy.displayPath(media))
+        let switchedHeight = render(model: switched, path: switchedPath)
+        precondition(switchedHeight > connectedHeight, "切换后应多出旧位置一行")
+        precondition(switchedHeight <= 520, "切换后设置页高度 \(switchedHeight) 超出预期")
+        print(
+            "media_folder_settings_proof=passed connected=\(connectedPath) disconnected=\(disconnectedPath) switched=\(switchedPath)"
+        )
     }
 
     @MainActor

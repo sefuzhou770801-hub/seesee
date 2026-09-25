@@ -92,6 +92,24 @@ struct DigestSettingsView: View {
                         Spacer(minLength: 0)
                     }
                 }
+                if model.previousMediaFolder != nil {
+                    row("") {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(MediaFolderCopy.previousFolderKept)
+                                .font(.system(size: 12))
+                                .foregroundStyle(OpenMyChrome.muted)
+                            Text(model.previousMediaPathText)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(OpenMyChrome.muted)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(MediaFolderCopy.previousFolderKept) \(model.previousMediaPathText)")
+                        Spacer(minLength: 8)
+                        secondaryButton(MediaFolderCopy.revealInFinder, action: model.revealPreviousMediaFolder)
+                    }
+                }
                 if let progress = model.mediaFolderMoveProgress {
                     row("") {
                         Text(progress.text)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 真实进程级：用构建出的 Replay 二进制加 --move-media-folder，在临时家目录搬 3 个小文件。
 # SPM 可执行文件的偏好域是 Replay，不是打包应用的 com.mg.replay。
-# 成功一次，再刻意造冲突失败一次。不碰真实片库。
+# 成功一次（旧位置文件必须一个不少），再刻意造冲突失败一次。不碰真实片库。
 set -euo pipefail
 
 binary="${1:-}"
@@ -36,6 +36,7 @@ cleanup() {
         wait "$app_pid" 2>/dev/null || true
     fi
     defaults delete Replay MediaFolderPath 2>/dev/null || true
+    defaults delete Replay MediaFolderPreviousPath 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -162,7 +163,7 @@ run_move() {
             && -f "$dest/${id1}.mp4" && -f "$dest/${id2}.mp4" && -f "$dest/${id3}.mp4" \
             && -f "$dest/${id1}.jpg" && -f "$dest/${id2}.jpg" && -f "$dest/${id3}.jpg" \
             && -f "$dest/${id1}.zh.srt" && -f "$dest/${id2}.zh.srt" && -f "$dest/${id3}.zh.srt" \
-            && ! -f "$source_dir/${id1}.mp4" && ! -f "$source_dir/${id2}.mp4" && ! -f "$source_dir/${id3}.mp4" ]]; then
+            && ! -f "$support/media-folder-move.inprogress" ]]; then
             sleep 1
             break
         fi
@@ -182,10 +183,20 @@ for id in "$id1" "$id2" "$id3"; do
     test -f "$dest_ok/${id}.mp4"
     test -f "$dest_ok/${id}.jpg"
     test -f "$dest_ok/${id}.zh.srt"
-    test ! -f "$source_dir/${id}.mp4"
-    test ! -f "$source_dir/${id}.jpg"
-    test ! -f "$source_dir/${id}.zh.srt"
+    test -f "$source_dir/${id}.mp4"
+    test -f "$source_dir/${id}.jpg"
+    test -f "$source_dir/${id}.zh.srt"
 done
+# 旧位置逐文件比对：切换后一个不少、内容不变。
+test "$(file_hash "$source_dir/${id1}.mp4")" = "$hash1"
+test "$(file_hash "$source_dir/${id2}.mp4")" = "$hash2"
+test "$(file_hash "$source_dir/${id3}.mp4")" = "$hash3"
+test "$(file_hash "$source_dir/${id1}.jpg")" = "$hash1t"
+test "$(file_hash "$source_dir/${id2}.jpg")" = "$hash2t"
+test "$(file_hash "$source_dir/${id3}.jpg")" = "$hash3t"
+test "$(file_hash "$source_dir/${id1}.zh.srt")" = "$hash1s"
+test "$(file_hash "$source_dir/${id2}.zh.srt")" = "$hash2s"
+test "$(file_hash "$source_dir/${id3}.zh.srt")" = "$hash3s"
 test "$(file_hash "$dest_ok/${id1}.mp4")" = "$hash1"
 test "$(file_hash "$dest_ok/${id2}.mp4")" = "$hash2"
 test "$(file_hash "$dest_ok/${id3}.mp4")" = "$hash3"
@@ -262,14 +273,13 @@ PY
 test ! -f "$support/media-folder-move.inprogress"
 pref=$(defaults read Replay MediaFolderPath)
 test "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$pref")" = "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$dest_ok")"
-echo "success dest=$dest_ok backup=$backup pref=$pref marker=cleared"
+echo "success dest=$dest_ok backup=$backup pref=$pref marker=cleared source_kept=9/9"
 
 echo "=== 冲突失败回滚 ==="
-mkdir -p "$source_dir"
-write_library_files
 write_queue
 cp "$support/queue.json" "$work/queue.fail-before.json"
 defaults delete Replay MediaFolderPath 2>/dev/null || true
+defaults delete Replay MediaFolderPreviousPath 2>/dev/null || true
 printf 'different-existing\n' > "$dest_fail/${id1}.mp4"
 run_move "$dest_fail" "$work/fail.log" 0
 

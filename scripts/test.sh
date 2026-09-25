@@ -529,3 +529,30 @@ compile_and_run media_folder_store \
     "$project_dir/Sources/Replay/MediaLibraryMover.swift" \
     "$project_dir/Sources/Replay/QueueStore.swift" \
     "$project_dir/tools/media_folder_store_check.swift"
+
+# 更改片库位置的数据安全：旧位置一个不删；复制中途、核对失败、改写队列中途退出后启动退回；queue.json 坏了不动文件。
+compile_and_run media_folder_move_safety \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleTrackRank.swift" \
+    "$project_dir/Sources/Replay/NetworkMonitor.swift" \
+    "$project_dir/Sources/Replay/PowerModeMonitor.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/QueueRowMeta.swift" \
+    "$project_dir/Sources/Replay/URLIntake.swift" \
+    "$project_dir/Sources/Replay/DownloadRetryPolicy.swift" \
+    "$project_dir/Sources/Replay/ChannelLink.swift" \
+    "$project_dir/Sources/Replay/PlaylistListing.swift" \
+    "$project_dir/Sources/Replay/ChannelSubscription.swift" \
+    "$project_dir/Sources/Replay/DownloadEngine.swift" \
+    "$project_dir/Sources/Replay/ChannelWatchStore.swift" \
+    "$project_dir/Sources/Replay/WatchQAStore.swift" \
+    "$project_dir/Sources/Replay/DigestAnnotations.swift" \
+    "$project_dir/Sources/Replay/MediaFolderCopy.swift" \
+    "$project_dir/Sources/Replay/MediaFolderAvailability.swift" \
+    "$project_dir/Sources/Replay/MediaFolderPreference.swift" \
+    "$project_dir/Sources/Replay/MediaFolderLaunchArguments.swift" \
+    "$project_dir/Sources/Replay/MediaLibraryMover.swift" \
+    "$project_dir/Sources/Replay/QueueStore.swift" \
+    "$project_dir/tools/media_folder_move_safety_check.swift"

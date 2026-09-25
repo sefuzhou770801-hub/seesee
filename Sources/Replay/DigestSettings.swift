@@ -160,6 +160,7 @@ final class DigestSettingsModel: ObservableObject {
     @Published var isMediaFolderDisconnected = false
     @Published var mediaFolderMoveProgress: MediaLibraryMoveProgress?
     @Published var mediaFolderMoveFailure: String?
+    @Published var previousMediaFolder: URL?
     var onChangeMediaFolder: (() -> Void)?
     var debounce: TimeInterval = 1.0
     private let verifier: DigestKeyVerifier
@@ -250,6 +251,13 @@ final class DigestSettingsModel: ObservableObject {
     func revealMediaFolder() {
         guard let mediaFolder else { return }
         NSWorkspace.shared.activateFileViewerSelecting([mediaFolder])
+    }
+
+    var previousMediaPathText: String { previousMediaFolder.map(DigestSettingsCopy.displayPath) ?? "" }
+
+    func revealPreviousMediaFolder() {
+        guard let previousMediaFolder else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([previousMediaFolder])
     }
 
     /// 等当前这轮验证结束（检查与证明图用）。

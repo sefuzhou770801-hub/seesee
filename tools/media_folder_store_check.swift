@@ -10,10 +10,9 @@ struct MediaFolderStoreCheck {
         try await checkMoveUpdatesStoreMediaFolder()
         try await checkDisconnectedSourceMoveIsRejected()
         try await checkDisconnectedDestinationMoveDoesNotCreate()
-        try await checkIncompleteMarkerRefusesNewMove()
-        try await checkStaleCompletedMarkerIsClearedOnLaunch()
-        try await checkInterruptG_LaunchDoesNotTreatAsComplete()
-        try await checkPartialDeleteDoesNotClaimSourcesRemain()
+        try await checkLaunchRollsBackUnfinishedMove()
+        try await checkUnreadableJournalBlocksMove()
+        try await checkPreviousFolderShownUntilEmptied()
         try await checkSettingsMirrorSeesFailureAfterChange()
         print("media_folder_store_check=passed")
     }
@@ -135,7 +134,7 @@ struct MediaFolderStoreCheck {
                 "搬移后 store.mediaFolder 必须跟着变，视图只能读这个值"
             )
             precondition(store.items.first?.localFilePath == dest.appendingPathComponent("\(id.uuidString).mp4").path)
-            precondition(!FileManager.default.fileExists(atPath: video.path))
+            precondition(FileManager.default.fileExists(atPath: video.path), "旧位置的文件必须留着")
             precondition(FileManager.default.fileExists(atPath: dest.appendingPathComponent("\(id.uuidString).mp4").path))
         }
     }
@@ -205,198 +204,99 @@ struct MediaFolderStoreCheck {
         }
     }
 
-    /// 审查 3：启动时发现进行中标记，拒绝新搬移并提示上次未完成。
-    private static func checkIncompleteMarkerRefusesNewMove() async throws {
+    /// 上次搬移中断：启动时退回旧位置并提示一句，之后可以正常重新更改。
+    private static func checkLaunchRollsBackUnfinishedMove() async throws {
         let env = try makeEnv()
         defer { try? FileManager.default.removeItem(at: env.root) }
 
-        try Data("from=/old\nto=/new\n".utf8).write(to: MediaFolderMoveMarker.url(beside: env.dataFile))
         let video = env.mediaFolder.appendingPathComponent("keep.mp4")
         try Data("video-bytes-one".utf8).write(to: video)
-        try writeQueue([], to: env.dataFile)
+        try writeQueue([readyItem(localFilePath: video.path)], to: env.dataFile)
+        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
+        var mover = MediaLibraryMover(defaults: env.defaults)
+        mover.interruptAfter = .afterCopyProgress(completed: 1)
+        let interrupted = mover
+        let first = await MainActor.run { () -> MediaLibraryMoveResult in
+            let store = QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
+            return store.moveMediaFolder(to: dest, mover: interrupted)
+        }
+        precondition(first == .failure(MediaFolderCopy.interrupted))
+
+        let relaunched = await MainActor.run {
+            QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
+        }
+        let retry = await MainActor.run { () -> (String?, MediaLibraryMoveResult) in
+            let message = relaunched.mediaFolderMoveMessage
+            return (message, relaunched.moveMediaFolder(to: dest))
+        }
+        precondition(retry.0 == MediaFolderCopy.pendingMoveRolledBack, "启动时应提示上次没完成、仍用原位置，实际 \(String(describing: retry.0))")
+        precondition(retry.1 == .success, "退回后重新更改应当成功，实际 \(retry.1)")
+        precondition(FileManager.default.fileExists(atPath: video.path))
+        precondition(FileManager.default.fileExists(atPath: dest.appendingPathComponent("keep.mp4").path))
+    }
+
+    /// 搬移记录读不出来：启动时提示，不改任何文件，也不让开始新的更改。
+    private static func checkUnreadableJournalBlocksMove() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.mediaFolder.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        try writeQueue([readyItem(localFilePath: video.path)], to: env.dataFile)
+        let journal = MediaFolderMoveJournal.url(beside: env.dataFile)
+        try Data("from=/old\nto=/new\n".utf8).write(to: journal)
+        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
+
+        let observed = await MainActor.run { () -> (String?, MediaLibraryMoveResult, String?) in
+            let store = QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
+            let atLaunch = store.mediaFolderMoveMessage
+            let result = store.moveMediaFolder(to: dest)
+            return (atLaunch, result, store.mediaFolderMoveMessage)
+        }
+        precondition(observed.0 == MediaFolderCopy.pendingMoveUnreadable, "实际 \(String(describing: observed.0))")
+        precondition(observed.1 == .failure(MediaFolderCopy.pendingMoveUnreadable), "实际 \(observed.1)")
+        precondition(observed.2 == MediaFolderCopy.failure(MediaFolderCopy.pendingMoveUnreadable))
+        precondition(try! Data(contentsOf: journal) == Data("from=/old\nto=/new\n".utf8))
+        precondition(FileManager.default.fileExists(atPath: video.path))
+        precondition(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    /// 切换后设置页显示旧位置那一行；旧位置在访达里删空后不再显示，记录也清掉。
+    private static func checkPreviousFolderShownUntilEmptied() async throws {
+        let env = try makeEnv()
+        defer { try? FileManager.default.removeItem(at: env.root) }
+
+        let video = env.mediaFolder.appendingPathComponent("keep.mp4")
+        try Data("video-bytes-one".utf8).write(to: video)
+        try writeQueue([readyItem(localFilePath: video.path)], to: env.dataFile)
+        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
 
         let store = await MainActor.run {
             QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
         }
-        let expected = MediaFolderCopy.leftoverDestinationNeedsCleanup(
-            URL(fileURLWithPath: "/new", isDirectory: true).standardizedFileURL.path
-        )
-        await MainActor.run {
-            precondition(store.mediaFolderMoveMessage == expected, "启动时必须提示目标可能有残余、需要手动清理")
+        let seen = await MainActor.run { () -> (URL?, URL?) in
+            let mirror = SettingsPageMirror()
+            mirror.bind(store)
+            precondition(store.previousMediaFolder == nil, "没切换过时不显示旧位置")
+            precondition(store.moveMediaFolder(to: dest) == .success)
+            return (store.previousMediaFolder, mirror.previous)
         }
-        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
-        let result = await MainActor.run {
-            store.moveMediaFolder(to: dest)
-        }
-        await MainActor.run {
-            precondition(result == .failure(expected), "有标记时拒绝新搬移，实际 \(result)")
-            precondition(store.mediaFolderMoveMessage == expected)
-            precondition(FileManager.default.fileExists(atPath: video.path))
-            precondition(!FileManager.default.fileExists(atPath: dest.path))
-        }
-    }
+        let expected = env.mediaFolder.standardizedFileURL.path
+        precondition(seen.0?.path == expected, "切换后应显示旧位置，实际 \(String(describing: seen.0))")
+        precondition(seen.1?.path == expected, "设置页应拿到旧位置，实际 \(String(describing: seen.1))")
 
-    /// 审查第 3 轮-1：源已删完、队列和偏好都已切走，只剩标记时，启动应清掉标记。
-    private static func checkStaleCompletedMarkerIsClearedOnLaunch() async throws {
-        let env = try makeEnv()
-        defer { try? FileManager.default.removeItem(at: env.root) }
+        let reopened = await MainActor.run {
+            QueueStore(dataFile: env.dataFile, mediaFolder: dest, defaults: env.defaults).previousMediaFolder
+        }
+        precondition(reopened?.path == expected, "重新打开应用仍应显示旧位置")
 
-        let destination = env.root.appendingPathComponent("to", isDirectory: true)
-        let library = try seedStoreLibrary(env)
-        var mover = MediaLibraryMover(defaults: env.defaults)
-        mover.interruptAfter = .afterSourcesDeleted
-        _ = mover.move(
-            from: env.mediaFolder,
-            to: destination,
-            dataFile: env.dataFile,
-            items: library,
-            hasActiveDownload: false
-        )
-        precondition(MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .completedMarkerLeft)
-
-        let store = await MainActor.run {
-            QueueStore(
-                dataFile: env.dataFile,
-                mediaFolder: destination,
-                defaults: env.defaults
-            )
+        try FileManager.default.removeItem(at: video)
+        let afterEmptied = await MainActor.run { () -> URL? in
+            store.refreshPreviousMediaFolder()
+            return store.previousMediaFolder
         }
-        await MainActor.run {
-            precondition(store.mediaFolderMoveMessage == nil, "已完成的过期标记不得提示未完成")
-            if let message = store.mediaFolderMoveMessage {
-                precondition(!message.contains(MediaFolderCopy.needsManualCleanup), "不得要求手动清理，实际 \(message)")
-                precondition(!message.contains("原来的视频都还在"), "不得谎称原文件还在，实际 \(message)")
-            }
-            precondition(
-                !FileManager.default.fileExists(atPath: MediaFolderMoveMarker.url(beside: env.dataFile).path),
-                "过期标记应被自动清掉"
-            )
-        }
-    }
-
-    /// 状态表 g：启动时队列和偏好已切、源文件还在，不得当成完成并清标记。
-    private static func checkInterruptG_LaunchDoesNotTreatAsComplete() async throws {
-        let env = try makeEnv()
-        defer { try? FileManager.default.removeItem(at: env.root) }
-
-        let destination = env.root.appendingPathComponent("to", isDirectory: true)
-        let library = try seedStoreLibrary(env)
-        var mover = MediaLibraryMover(defaults: env.defaults)
-        mover.interruptAfter = .afterPreferenceSaved
-        _ = mover.move(
-            from: env.mediaFolder,
-            to: destination,
-            dataFile: env.dataFile,
-            items: library,
-            hasActiveDownload: false
-        )
-        precondition(
-            MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .committedNeedsCleanup,
-            "启动前必须识别为收尾未完"
-        )
-        for item in library {
-            let name = URL(fileURLWithPath: item.localFilePath!).lastPathComponent
-            precondition(FileManager.default.fileExists(atPath: env.mediaFolder.appendingPathComponent(name).path))
-        }
-
-        let store = await MainActor.run {
-            QueueStore(
-                dataFile: env.dataFile,
-                mediaFolder: destination,
-                defaults: env.defaults
-            )
-        }
-        await MainActor.run {
-            if let message = store.mediaFolderMoveMessage {
-                precondition(!message.contains(MediaFolderCopy.needsManualCleanup), "不得要求手动清理目标，实际 \(message)")
-                precondition(!message.contains("原来的视频都还在"), "不得谎称原文件还在，实际 \(message)")
-            }
-            for item in library {
-                let name = URL(fileURLWithPath: item.localFilePath!).lastPathComponent
-                precondition(
-                    !FileManager.default.fileExists(atPath: env.mediaFolder.appendingPathComponent(name).path),
-                    "启动收尾应补删源文件 \(name)"
-                )
-                precondition(FileManager.default.fileExists(atPath: destination.appendingPathComponent(name).path))
-            }
-            precondition(
-                MediaFolderMoveRecovery.inspect(beside: env.dataFile, defaults: env.defaults) == .idle
-                    || !MediaFolderMoveMarker.exists(beside: env.dataFile)
-            )
-        }
-    }
-
-    private static func seedStoreLibrary(_ env: Env) throws -> [WatchItem] {
-        var items: [WatchItem] = []
-        for index in 0..<2 {
-            let id = UUID()
-            let video = env.mediaFolder.appendingPathComponent("\(id.uuidString).mp4")
-            try Data("store-video-\(index)".utf8).write(to: video)
-            items.append(
-                WatchItem(
-                    id: id,
-                    urlString: "https://example.com/\(id.uuidString)",
-                    title: "store-\(index)",
-                    author: "check",
-                    duration: 12,
-                    addedAt: Date(timeIntervalSince1970: 1_700_000_000),
-                    watchedAt: nil,
-                    state: .ready,
-                    progress: 1,
-                    progressLabel: "已下载",
-                    localFilePath: video.path,
-                    errorMessage: nil,
-                    playbackPosition: nil,
-                    chapters: nil,
-                    thumbnailFilePath: nil,
-                    subtitleFilePath: nil
-                )
-            )
-        }
-        try writeQueue(items, to: env.dataFile)
-        return items
-    }
-
-    /// 审查第 2 轮-2：QueueStore 对部分删除用告知文案，不用「原来的视频都还在」。
-    private static func checkPartialDeleteDoesNotClaimSourcesRemain() async throws {
-        let env = try makeEnv()
-        defer { try? FileManager.default.removeItem(at: env.root) }
-
-        let first = env.mediaFolder.appendingPathComponent("one.mp4")
-        let second = env.mediaFolder.appendingPathComponent("two.mp4")
-        try Data("video-bytes-one".utf8).write(to: first)
-        try Data("video-bytes-two".utf8).write(to: second)
-        try writeQueue([], to: env.dataFile)
-        var sourceDeletes = 0
-        var mover = MediaLibraryMover(defaults: env.defaults)
-        mover.removeItem = { url in
-            if url.path.hasPrefix(env.mediaFolder.path) {
-                sourceDeletes += 1
-                if sourceDeletes == 2 {
-                    throw NSError(
-                        domain: "media-folder-check",
-                        code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "operation not permitted"]
-                    )
-                }
-            }
-            try FileManager.default.removeItem(at: url)
-        }
-        let injected = mover
-        let dest = env.root.appendingPathComponent("new-library", isDirectory: true)
-        let observed = await MainActor.run { () -> (MediaLibraryMoveResult, String?, URL) in
-            let store = QueueStore(dataFile: env.dataFile, mediaFolder: env.mediaFolder, defaults: env.defaults)
-            let result = store.moveMediaFolder(to: dest, mover: injected)
-            return (result, store.mediaFolderMoveMessage, store.mediaFolder)
-        }
-        guard case .finishedWithSourceLeftovers(let note) = observed.0 else {
-            fatalError("部分删除应是搬移已完成，实际 \(observed.0)")
-        }
-        precondition(observed.1 == note)
-        precondition(!note.contains("原来的视频都还在"))
-        precondition(note.contains("搬移已经完成"))
-        precondition(observed.2.standardizedFileURL.path == dest.standardizedFileURL.path)
-        precondition(env.defaults.string(forKey: MediaFolderPreference.key) == dest.standardizedFileURL.path)
+        precondition(afterEmptied == nil, "旧位置删空后不再显示")
+        precondition(env.defaults.string(forKey: QueueStore.previousMediaFolderKey) == nil, "删空后清掉记录")
     }
 
     /// 审查 5：设置页订赋值后的发布，看到的失败文案与 store 最终值一致。
@@ -457,6 +357,7 @@ struct MediaFolderStoreCheck {
     private final class SettingsPageMirror {
         var failure: String?
         var folder: URL?
+        var previous: URL?
         private var bag = Set<AnyCancellable>()
 
         func bind(_ store: QueueStore) {
@@ -465,6 +366,9 @@ struct MediaFolderStoreCheck {
                 .store(in: &bag)
             store.$mediaFolder
                 .sink { [weak self] in self?.folder = $0 }
+                .store(in: &bag)
+            store.$previousMediaFolder
+                .sink { [weak self] in self?.previous = $0 }
                 .store(in: &bag)
         }
     }
@@ -498,6 +402,27 @@ struct MediaFolderStoreCheck {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(items).write(to: dataFile)
+    }
+
+    private static func readyItem(localFilePath: String) -> WatchItem {
+        WatchItem(
+            id: UUID(),
+            urlString: "https://example.com/ready",
+            title: "ready",
+            author: "check",
+            duration: 8,
+            addedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            watchedAt: nil,
+            state: .ready,
+            progress: 1,
+            progressLabel: "已下载",
+            localFilePath: localFilePath,
+            errorMessage: nil,
+            playbackPosition: nil,
+            chapters: nil,
+            thumbnailFilePath: nil,
+            subtitleFilePath: nil
+        )
     }
 
     private static func queuedItem(id: UUID) -> WatchItem {

@@ -87,7 +87,11 @@ final class QueueStore: ObservableObject {
     @Published private(set) var isMediaFolderDisconnected = false
     @Published private(set) var mediaFolderMoveProgress: MediaLibraryMoveProgress?
     @Published private(set) var mediaFolderMoveMessage: String?
+    /// 切换后旧位置还留着的那份片库；用户在访达里删空后不再显示。
+    @Published private(set) var previousMediaFolder: URL?
     private var isMovingMediaFolder = false
+    /// queue.json 在但读不出来或解码失败：无法判断，本次运行不写它，也不更改片库位置。
+    private var isQueueFileUnreadable = false
     private let defaults: UserDefaults
     private let resolveMountedVolumes: () -> [URL]
     private let volumesRoot: URL
@@ -111,6 +115,12 @@ final class QueueStore: ObservableObject {
         defaults = .standard
         volumesRoot = MediaFolderAvailability.defaultVolumesRoot
         resolveMountedVolumes = { MediaFolderAvailability.liveMountedVolumes() }
+        // 上次更改位置没做完就先退回旧位置，再按（可能已退回的）偏好定片库目录。
+        let recovery = MediaFolderMoveRecovery.rollBackPendingMove(
+            beside: dataFile,
+            defaults: .standard,
+            mountedVolumes: MediaFolderAvailability.liveMountedVolumes()
+        )
         mediaFolder = MediaFolderPreference.resolve(defaults: .standard) ?? migration.mediaFolder
         channelWatch = ChannelWatchStore(
             dataFile: applicationSupport.appendingPathComponent("subscriptions.json"),
@@ -120,7 +130,8 @@ final class QueueStore: ObservableObject {
         refreshMediaFolderConnection()
         createMediaFolderIfConnected()
         load()
-        applyIncompleteMoveBannerIfNeeded()
+        showRecoveryOutcome(recovery)
+        refreshPreviousMediaFolder()
         migrateQueueToNewestFirstIfNeeded()
 
         if migration.didMoveMediaFolder, MediaFolderPreference.resolve(defaults: .standard) == nil {
@@ -156,6 +167,12 @@ final class QueueStore: ObservableObject {
             if let mountedVolumeURLs { return mountedVolumeURLs }
             return MediaFolderAvailability.liveMountedVolumes()
         }
+        let recovery = MediaFolderMoveRecovery.rollBackPendingMove(
+            beside: dataFile,
+            defaults: defaults,
+            mountedVolumes: mountedVolumeURLs ?? MediaFolderAvailability.liveMountedVolumes(),
+            volumesRoot: volumesRoot
+        )
         self.mediaFolder = mediaFolder
         self.channelWatch = ChannelWatchStore(
             dataFile: dataFile.deletingLastPathComponent().appendingPathComponent("subscriptions.json"),
@@ -164,7 +181,8 @@ final class QueueStore: ObservableObject {
         refreshMediaFolderConnection()
         createMediaFolderIfConnected()
         load()
-        applyIncompleteMoveBannerIfNeeded()
+        showRecoveryOutcome(recovery)
+        refreshPreviousMediaFolder()
     }
 
     private func wireMonitors() {
@@ -688,25 +706,9 @@ final class QueueStore: ObservableObject {
         guard !isMovingMediaFolder else {
             return .failure("正在搬移视频")
         }
-        if MediaFolderMoveMarker.exists(beside: dataFile) {
-            let verdict = MediaFolderMoveRecovery.apply(beside: dataFile, defaults: defaults)
-            switch verdict {
-            case .idle:
-                MediaFolderLog.info("recovered leftover move marker")
-            case .completedMarkerLeft:
-                MediaFolderLog.info("move already complete; leftover marker stayed")
-            case .committedNeedsCleanup:
-                let note = MediaFolderCopy.sourceLeftovers(
-                    names: MediaFolderMoveRecovery.remainingSourceNames(beside: dataFile),
-                    sourcePath: MediaFolderMoveMarker.source(beside: dataFile)?.path ?? mediaFolder.path
-                )
-                mediaFolderMoveMessage = note
-                return .finishedWithSourceLeftovers(note)
-            case .incomplete:
-                let reason = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
-                mediaFolderMoveMessage = reason
-                return .failure(reason)
-            }
+        guard !isQueueFileUnreadable else {
+            mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.queueUnreadable)
+            return .failure(MediaFolderCopy.queueUnreadable)
         }
         isMovingMediaFolder = true
         mediaFolderMoveMessage = nil
@@ -714,6 +716,7 @@ final class QueueStore: ObservableObject {
         defer { isMovingMediaFolder = false }
 
         flushPendingSaves()
+        let previous = mediaFolder
         let used = mover ?? MediaLibraryMover(
             defaults: defaults,
             mountedVolumes: resolveMountedVolumes(),
@@ -723,7 +726,6 @@ final class QueueStore: ObservableObject {
             from: mediaFolder,
             to: destination,
             dataFile: dataFile,
-            items: items,
             hasActiveDownload: items.contains(where: { $0.state == .downloading })
         ) { [weak self] progress in
             self?.mediaFolderMoveProgress = progress
@@ -732,54 +734,72 @@ final class QueueStore: ObservableObject {
 
         switch result {
         case .success:
-            applyMovedMediaFolder(destination)
-            mediaFolderMoveMessage = nil
-            MediaFolderLog.info("move succeeded: \(destination.path)")
-        case .finishedWithSourceLeftovers(let note):
-            applyMovedMediaFolder(destination)
-            mediaFolderMoveMessage = note
-            MediaFolderLog.info("move finished with leftover sources: \(note)")
+            defaults.set(previous.standardizedFileURL.path, forKey: Self.previousMediaFolderKey)
+            mediaFolder = destination.standardizedFileURL
+            load()
+            refreshMediaFolderConnection()
+            refreshPreviousMediaFolder()
+            MediaFolderLog.info("move succeeded: \(destination.path); old copy kept at \(previous.path)")
         case .noOp:
             MediaFolderLog.info("move skipped: destination is the current folder")
         case .failure(let reason):
-            reconcileAfterFailedMove(destination: destination, reason: reason)
+            mediaFolderMoveMessage = MediaFolderCopy.failure(reason)
             MediaFolderLog.error("move failed: \(reason)")
         }
         return result
     }
 
-    private func applyMovedMediaFolder(_ destination: URL) {
-        mediaFolder = destination.standardizedFileURL
-        load()
-        refreshMediaFolderConnection()
-    }
-
-    private func reconcileAfterFailedMove(destination: URL, reason: String) {
-        mediaFolderMoveMessage = MediaFolderCopy.failure(reason)
-        guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
-        if let saved = MediaFolderPreference.resolve(defaults: defaults),
-           saved.standardizedFileURL.path == destination.standardizedFileURL.path {
-            mediaFolder = saved
-            load()
-            refreshMediaFolderConnection()
+    private func showRecoveryOutcome(_ outcome: MediaFolderMoveRecoveryOutcome) {
+        switch outcome {
+        case .nothingPending:
+            break
+        case .rolledBack:
+            mediaFolderMoveMessage = MediaFolderCopy.pendingMoveRolledBack
+            MediaFolderLog.info("rolled back unfinished move")
+        case .needsAttention(let reason):
+            mediaFolderMoveMessage = reason
+            MediaFolderLog.error("unfinished move needs attention: \(reason)")
         }
     }
 
-    private func applyIncompleteMoveBannerIfNeeded() {
-        guard MediaFolderMoveMarker.exists(beside: dataFile) else { return }
-        let verdict = MediaFolderMoveRecovery.apply(beside: dataFile, defaults: defaults)
-        switch verdict {
-        case .idle, .completedMarkerLeft:
-            MediaFolderLog.info("recovered leftover move marker")
+    static let previousMediaFolderKey = "MediaFolderPreviousPath"
+
+    /// 旧位置还在、里面还有文件时才显示；已删空或就是当前位置时清掉记录。
+    func refreshPreviousMediaFolder() {
+        guard let path = defaults.string(forKey: Self.previousMediaFolderKey) else {
+            previousMediaFolder = nil
             return
-        case .committedNeedsCleanup:
-            mediaFolderMoveMessage = MediaFolderCopy.sourceLeftovers(
-                names: MediaFolderMoveRecovery.remainingSourceNames(beside: dataFile),
-                sourcePath: MediaFolderMoveMarker.source(beside: dataFile)?.path ?? mediaFolder.path
-            )
-        case .incomplete:
-            mediaFolderMoveMessage = MediaFolderMoveMarker.incompleteReason(beside: dataFile)
         }
+        let folder = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        if MediaFolderAvailability.isDisconnected(folder, mountedVolumes: resolveMountedVolumes(), volumesRoot: volumesRoot) {
+            previousMediaFolder = nil
+            return
+        }
+        guard folder.path != mediaFolder.standardizedFileURL.path, Self.containsAnyFile(folder) else {
+            defaults.removeObject(forKey: Self.previousMediaFolderKey)
+            previousMediaFolder = nil
+            return
+        }
+        previousMediaFolder = folder
+    }
+
+    func revealPreviousMediaFolder() {
+        guard let previousMediaFolder else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([previousMediaFolder])
+    }
+
+    private static func containsAnyFile(_ folder: URL) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        for case let file as URL in enumerator {
+            if (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                return true
+            }
+        }
+        return false
     }
 
     func refreshMediaFolderConnection() {
@@ -1166,17 +1186,26 @@ final class QueueStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: dataFile) else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        items = (try? decoder.decode([WatchItem].self, from: data)) ?? []
+        guard FileManager.default.fileExists(atPath: dataFile.path) else { return }
+        guard let data = try? Data(contentsOf: dataFile),
+              let decoded = MediaFolderMoveRecovery.decodeQueue(data) else {
+            // 读不出来就当作无法判断：列表先空着，但不拿空列表覆盖原文件。
+            isQueueFileUnreadable = true
+            items = []
+            mediaFolderMoveMessage = MediaFolderCopy.queueUnreadable
+            return
+        }
+        isQueueFileUnreadable = false
+        items = decoded
     }
 
     private func save() {
+        guard !isQueueFileUnreadable else { return }
         persistenceWriter.schedule(items)
     }
 
     func flushPendingSaves() {
+        guard !isQueueFileUnreadable else { return }
         persistenceWriter.flush(items)
     }
 }
