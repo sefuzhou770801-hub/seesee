@@ -476,3 +476,28 @@ compile_and_run qa_remove \
 compile_and_run lan_player \
     "$project_dir/tools/LanPlayer.swift" \
     "$project_dir/tools/lan_player_check.swift"
+
+# 局域网播放命令行：--bind 给 0.0.0.0 或公网地址必须直接报错退出，不能监听。
+swiftc -parse-as-library \
+    "$project_dir/tools/LanPlayer.swift" \
+    "$project_dir/tools/lan_player_main.swift" \
+    -o "$scratch_dir/lan_player_cli"
+printf '[]' > "$scratch_dir/lan_queue.json"
+for bind_host in 0.0.0.0 8.8.8.8; do
+    set +e
+    perl -e 'alarm 5; exec @ARGV' "$scratch_dir/lan_player_cli" \
+        --queue "$scratch_dir/lan_queue.json" \
+        --token-file "$scratch_dir/lan_token" \
+        --bind "$bind_host" --port 0 >/dev/null 2>"$scratch_dir/lan_cli_err"
+    bind_status=$?
+    set -e
+    if [[ $bind_status -ne 1 ]] || ! grep -q "只能监听" "$scratch_dir/lan_cli_err"; then
+        echo "lan_player_cli: --bind $bind_host 必须拒绝，退出码 $bind_status" >&2
+        exit 1
+    fi
+    if [[ -e "$scratch_dir/lan_token" ]]; then
+        echo "lan_player_cli: --bind $bind_host 被拒绝前不得生成访问码文件" >&2
+        exit 1
+    fi
+done
+echo "lan_player_cli_bind=passed"

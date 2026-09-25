@@ -91,7 +91,7 @@ struct LanLibrary {
 
     static func load(queueFile: URL) throws -> LanLibrary {
         let data = try Data(contentsOf: queueFile)
-        return try load(queueJSON: data) { FileManager.default.fileExists(atPath: $0) }
+        return try load(queueJSON: data) { LanFile.isRegularFile($0) }
     }
 
     func videoURL(_ id: UUID) -> URL? {
@@ -118,6 +118,27 @@ struct LanLibrary {
         var localFilePath: String?
         var thumbnailFilePath: String?
         var subtitleFilePath: String?
+    }
+}
+
+/// 只认普通文件：路径本身是符号链接一律当作不存在，打开时也不跟随链接，
+/// 防止队列里的链接把队列之外的文件带出去。
+enum LanFile {
+    static func isRegularFile(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        return info.st_mode & S_IFMT == S_IFREG
+    }
+
+    static func openRegular(_ path: String) -> (handle: FileHandle, length: UInt64)? {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            close(fd)
+            return nil
+        }
+        return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), UInt64(info.st_size))
     }
 }
 
@@ -269,6 +290,15 @@ struct LanHTTPResponse {
 
 enum LanHTTP {
     static func handle(_ request: LanHTTPRequest, token: String, library: LanLibrary) -> LanHTTPResponse {
+        handle(request, token: token, loadLibrary: { library })
+    }
+
+    /// 先核对来源和访问码，再限定只读方法，最后才解析队列，未授权请求不触发读队列。
+    static func handle(
+        _ request: LanHTTPRequest,
+        token: String,
+        loadLibrary: () throws -> LanLibrary
+    ) -> LanHTTPResponse {
         guard LanNet.isPrivateIPv4(request.remoteHost) else {
             return LanHTTPResponse.text(403, "拒绝")
         }
@@ -276,9 +306,35 @@ enum LanHTTP {
         guard LanAccess.provided(provided, matches: token) else {
             return LanHTTPResponse.text(403, "需要访问码")
         }
+        let method = request.method.uppercased()
+        guard method == "GET" || method == "HEAD" else {
+            var response = LanHTTPResponse.text(405, "只能读取")
+            response.headers["Allow"] = "GET, HEAD"
+            return response
+        }
         guard let route = LanRoute.parse(request.path) else {
             return LanHTTPResponse.text(404, "没有这部片")
         }
+        let library: LanLibrary
+        do {
+            library = try loadLibrary()
+        } catch {
+            return LanHTTPResponse.text(500, "读不了队列")
+        }
+        var response = routed(route, request: request, token: token, library: library)
+        if method == "HEAD" {
+            response.file = nil
+            response.body = Data()
+        }
+        return response
+    }
+
+    private static func routed(
+        _ route: LanRoute,
+        request: LanHTTPRequest,
+        token: String,
+        library: LanLibrary
+    ) -> LanHTTPResponse {
         switch route {
         case .home:
             return withCookie(LanHTTPResponse.html(200, LanPages.home(library.items, token: token)), token: token)
@@ -299,7 +355,13 @@ enum LanHTTP {
                 return LanHTTPResponse.text(404, "没有字幕")
             }
             do {
-                var raw = try String(contentsOf: url, encoding: .utf8)
+                guard let opened = LanFile.openRegular(url.path) else {
+                    return LanHTTPResponse.text(404, "没有字幕")
+                }
+                defer { try? opened.handle.close() }
+                guard var raw = String(data: try opened.handle.readToEnd() ?? Data(), encoding: .utf8) else {
+                    return LanHTTPResponse.text(404, "没有字幕")
+                }
                 if raw.hasPrefix("\u{FEFF}") { raw.removeFirst() }
                 let vtt = url.path.lowercased().hasSuffix(".vtt") ? (raw.hasPrefix("WEBVTT") ? raw : "WEBVTT\n\n" + raw) : LanSRT.toVTT(raw)
                 let data = Data(vtt.utf8)
@@ -320,15 +382,11 @@ enum LanHTTP {
     }
 
     private static func fileResponse(_ request: LanHTTPRequest, url: URL?, type: String) -> LanHTTPResponse {
-        guard let url, FileManager.default.fileExists(atPath: url.path) else {
+        guard let url, let opened = LanFile.openRegular(url.path) else {
             return LanHTTPResponse.text(404, "没有这部片")
         }
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let sizeNumber = attrs[.size] as? NSNumber
-        else {
-            return LanHTTPResponse.text(404, "没有这部片")
-        }
-        let length = sizeNumber.uint64Value
+        try? opened.handle.close()
+        let length = opened.length
         let range = LanByteRange.parse(header(request.headers, "range"), fileLength: length)
         var response: LanHTTPResponse
         switch range {
@@ -368,10 +426,6 @@ enum LanHTTP {
                 body: Data(),
                 file: nil
             )
-        }
-        if request.method.uppercased() == "HEAD" {
-            response.file = nil
-            response.body = Data()
         }
         return response
     }
@@ -539,6 +593,24 @@ enum LanNet {
         return preferred ?? fallback
     }
 
+    /// 监听地址只允许回环和 RFC1918 私网段；0.0.0.0、公网、链路本地一律拒绝。
+    static func isAllowedBindHost(_ host: String) -> Bool {
+        var addr = in_addr()
+        guard host.withCString({ inet_pton(AF_INET, $0, &addr) }) == 1 else { return false }
+        let parts = host.split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else { return false }
+        switch parts[0] {
+        case 127, 10:
+            return true
+        case 172:
+            return (16...31).contains(parts[1])
+        case 192:
+            return parts[1] == 168
+        default:
+            return false
+        }
+    }
+
     static func isPrivateIPv4(_ ip: String) -> Bool {
         let parts = ip.split(separator: ".").compactMap { UInt8($0) }
         guard parts.count == 4 else { return false }
@@ -565,6 +637,13 @@ final class LanPlayerServer {
     }
 
     func start(hosts: [String]) throws {
+        if let rejected = hosts.first(where: { !LanNet.isAllowedBindHost($0) }) {
+            throw NSError(
+                domain: "LanPlayer",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "只能监听本机回环或局域网私有地址，拒绝 \(rejected)"]
+            )
+        }
         running = true
         var boundPort = port
         for host in hosts {
@@ -738,7 +817,7 @@ final class LanPlayerServer {
     }
 
     private func writeFile(fd: Int32, _ file: LanHTTPResponse.FileSlice) {
-        guard let handle = try? FileHandle(forReadingFrom: file.url) else { return }
+        guard let handle = LanFile.openRegular(file.url.path)?.handle else { return }
         defer { try? handle.close() }
         do {
             try handle.seek(toOffset: file.offset)
@@ -774,7 +853,9 @@ final class LanPlayerServer {
         case 400: return "Bad Request"
         case 403: return "Forbidden"
         case 404: return "Not Found"
+        case 405: return "Method Not Allowed"
         case 416: return "Range Not Satisfiable"
+        case 500: return "Internal Server Error"
         default: return "Error"
         }
     }
@@ -801,11 +882,8 @@ final class LanPlayerRuntime {
         let queueFile = self.queueFile
         let token = self.token
         let server = LanPlayerServer(port: port) { request in
-            do {
-                let library = try LanLibrary.load(queueFile: queueFile)
-                return LanHTTP.handle(request, token: token, library: library)
-            } catch {
-                return LanHTTPResponse.text(500, "读不了队列")
+            LanHTTP.handle(request, token: token) {
+                try LanLibrary.load(queueFile: queueFile)
             }
         }
         try server.start(hosts: hosts)

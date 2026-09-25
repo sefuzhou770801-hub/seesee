@@ -19,8 +19,7 @@ struct LanPlayerCommand {
             try runtime.start(hosts: hosts, port: options.port)
             var printed = Set<String>()
             for host in hosts {
-                let display = host == "0.0.0.0" ? (LanNet.lanIPv4() ?? "127.0.0.1") : host
-                let line = "打开：http://\(display):\(runtime.port)/?k=\(token)\n"
+                let line = "打开：http://\(host):\(runtime.port)/?k=\(token)\n"
                 if printed.insert(line).inserted {
                     FileHandle.standardOutput.write(Data(line.utf8))
                 }
@@ -44,6 +43,7 @@ private struct Options {
         """
         用法：scripts/lan_player.sh [--port 18780] [--bind 地址]
         在 iPad Safari 打开启动时打印的地址。
+        --bind 只接受 127.0.0.1 或局域网私有地址（10.x、172.16–31.x、192.168.x）。
 
         """
     }
@@ -71,6 +71,13 @@ private struct Options {
                 index += 1
                 guard index < arguments.count else {
                     throw NSError(domain: "LanPlayer", code: 7, userInfo: [NSLocalizedDescriptionKey: "缺少绑定地址"])
+                }
+                guard LanNet.isAllowedBindHost(arguments[index]) else {
+                    throw NSError(
+                        domain: "LanPlayer",
+                        code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "只能监听本机回环或局域网私有地址，拒绝 \(arguments[index])"]
+                    )
                 }
                 options.bind = arguments[index]
             case "--queue":
