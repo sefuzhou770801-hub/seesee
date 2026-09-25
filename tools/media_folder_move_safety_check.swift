@@ -16,6 +16,7 @@ struct MediaFolderMoveSafetyCheck {
         await run("interrupt_after_preference_saved", checkInterruptAfterPreferenceSaved)
         await run("corrupt_queue_move_touches_nothing", checkCorruptQueueMoveTouchesNothing)
         await run("corrupt_queue_pending_move_touches_nothing", checkCorruptQueuePendingMoveTouchesNothing)
+        await run("queue_corrupted_while_running_move_touches_nothing", checkQueueCorruptedWhileRunningMoveTouchesNothing)
 
         let failed = results.filter { !$0.failures.isEmpty }
         for result in results {
@@ -170,6 +171,41 @@ struct MediaFolderMoveSafetyCheck {
         expect(try snapshot(env.source) == before, "旧位置文件不得有任何变化")
         expect(try Data(contentsOf: env.dataFile) == corrupt, "损坏的 queue.json 不得被覆盖")
         expect(try snapshot(env.support) == supportBefore, "数据目录不得多出或改动任何文件（备份、记录都不写）")
+        expect(!FileManager.default.fileExists(atPath: env.destination.path), "不得创建新位置")
+        expect(env.preference == nil, "偏好不得改")
+    }
+
+    /// 应用启动时 queue.json 还好好的，运行中途被改坏，这时用户点「更改…」：
+    /// 不得先把内存里的旧队列写回去再搬，必须按当前磁盘上的文件判断，任何文件都不动。
+    private static func checkQueueCorruptedWhileRunningMoveTouchesNothing() async throws {
+        let env = try makeEnv()
+        defer { env.cleanUp() }
+        _ = try seedLibrary(env)
+        let store = await MainActor.run {
+            QueueStore(dataFile: env.dataFile, mediaFolder: env.source, defaults: env.defaults)
+        }
+        let loaded = await MainActor.run { store.items.count }
+        expect(loaded == 3, "启动时队列应能正常读出 3 条，实际 \(loaded)")
+
+        let corrupt = Data("{ 运行中被改坏".utf8)
+        try corrupt.write(to: env.dataFile)
+        let before = try snapshot(env.source)
+        let supportBefore = try snapshot(env.support)
+
+        let observed = await MainActor.run { () -> (MediaLibraryMoveResult, String?, String) in
+            let result = store.moveMediaFolder(to: env.destination)
+            store.flushPendingSaves()
+            return (result, store.mediaFolderMoveMessage, store.mediaFolder.standardizedFileURL.path)
+        }
+        expect(observed.0 == .failure(MediaFolderCopy.queueUnreadable), "运行中 queue.json 坏了必须拒绝，实际 \(observed.0)")
+        expect(
+            observed.1 == MediaFolderCopy.failure(MediaFolderCopy.queueUnreadable),
+            "设置页应提示 queue.json 读不出来，实际 \(String(describing: observed.1))"
+        )
+        expect(observed.2 == env.source.standardizedFileURL.path, "片库位置不得切换")
+        expect(try Data(contentsOf: env.dataFile) == corrupt, "坏掉的 queue.json 不得被内存里的旧队列覆盖")
+        expect(try snapshot(env.support) == supportBefore, "数据目录不得多出或改动任何文件（备份、记录都不写）")
+        expect(try snapshot(env.source) == before, "旧位置文件不得有任何变化")
         expect(!FileManager.default.fileExists(atPath: env.destination.path), "不得创建新位置")
         expect(env.preference == nil, "偏好不得改")
     }

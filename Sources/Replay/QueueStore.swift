@@ -25,6 +25,15 @@ private final class QueuePersistenceWriter {
         }
     }
 
+    /// 丢掉还没落盘的写入：发现 queue.json 读不出来时用，免得延迟写入随后把它覆盖。
+    func cancelPending() {
+        queue.sync {
+            pendingWork?.cancel()
+            pendingWork = nil
+            pendingItems = nil
+        }
+    }
+
     func flush(_ items: [WatchItem]) {
         queue.sync {
             pendingWork?.cancel()
@@ -706,8 +715,15 @@ final class QueueStore: ObservableObject {
         guard !isMovingMediaFolder else {
             return .failure("正在搬移视频")
         }
-        guard !isQueueFileUnreadable else {
+        // 按磁盘上当前的 queue.json 判断，不信启动时读的结果：运行中被改坏时，
+        // 先 flush 会拿内存里的旧队列把它覆盖掉，之后的搬移就看不出它坏过。
+        guard !isQueueFileUnreadable, queueFileDecodesOnDisk() else {
+            if FileManager.default.fileExists(atPath: dataFile.path) {
+                isQueueFileUnreadable = true
+                persistenceWriter.cancelPending()
+            }
             mediaFolderMoveMessage = MediaFolderCopy.failure(MediaFolderCopy.queueUnreadable)
+            MediaFolderLog.error("move refused: queue.json unreadable on disk")
             return .failure(MediaFolderCopy.queueUnreadable)
         }
         isMovingMediaFolder = true
@@ -747,6 +763,11 @@ final class QueueStore: ObservableObject {
             MediaFolderLog.error("move failed: \(reason)")
         }
         return result
+    }
+
+    private func queueFileDecodesOnDisk() -> Bool {
+        guard let data = try? Data(contentsOf: dataFile) else { return false }
+        return MediaFolderMoveRecovery.decodeQueue(data) != nil
     }
 
     private func showRecoveryOutcome(_ outcome: MediaFolderMoveRecoveryOutcome) {
