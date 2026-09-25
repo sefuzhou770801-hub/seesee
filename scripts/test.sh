@@ -472,3 +472,7 @@ compile_and_run qa_remove \
     "$project_dir/Sources/Replay/DigestAnnotations.swift" \
     "$project_dir/Sources/Replay/QueueStore.swift" \
     "$project_dir/tools/qa_remove_check.swift"
+
+compile_and_run lan_player \
+    "$project_dir/tools/LanPlayer.swift" \
+    "$project_dir/tools/lan_player_check.swift"
