@@ -57,8 +57,10 @@ struct LanLibrary {
     var videos: [UUID: String]
     var thumbnails: [UUID: String]
     var subtitles: [UUID: String]
+    /// 片库根目录（应用的媒体目录）。只提供真实路径落在它之内的文件。
+    var mediaRoot: URL
 
-    static func load(queueJSON: Data, fileExists: (String) -> Bool) throws -> LanLibrary {
+    static func load(queueJSON: Data, mediaRoot: URL, fileExists: (String) -> Bool) throws -> LanLibrary {
         let rows = try JSONDecoder().decode([QueueRow].self, from: queueJSON)
         var items: [LanCatalogItem] = []
         var videos: [UUID: String] = [:]
@@ -86,12 +88,18 @@ struct LanLibrary {
             if hasThumb, let thumb { thumbnails[row.id] = thumb }
             if hasZh, let subtitle { subtitles[row.id] = subtitle }
         }
-        return LanLibrary(items: items, videos: videos, thumbnails: thumbnails, subtitles: subtitles)
+        return LanLibrary(
+            items: items,
+            videos: videos,
+            thumbnails: thumbnails,
+            subtitles: subtitles,
+            mediaRoot: mediaRoot
+        )
     }
 
-    static func load(queueFile: URL) throws -> LanLibrary {
+    static func load(queueFile: URL, mediaRoot: URL) throws -> LanLibrary {
         let data = try Data(contentsOf: queueFile)
-        return try load(queueJSON: data) { LanFile.isRegularFile($0) }
+        return try load(queueJSON: data, mediaRoot: mediaRoot) { LanFile.isServable($0, inside: mediaRoot) }
     }
 
     func videoURL(_ id: UUID) -> URL? {
@@ -121,24 +129,49 @@ struct LanLibrary {
     }
 }
 
-/// 只认普通文件：路径本身是符号链接一律当作不存在，打开时也不跟随链接，
-/// 防止队列里的链接把队列之外的文件带出去。
+/// 片库只提供片库根目录里的文件：解开所有符号链接后的真实路径必须落在根目录的真实路径之内，
+/// 否则一律当作不存在。加载队列和响应请求都走这里，判断只有一处。
 enum LanFile {
-    static func isRegularFile(_ path: String) -> Bool {
-        var info = stat()
-        guard lstat(path, &info) == 0 else { return false }
-        return info.st_mode & S_IFMT == S_IFREG
+    static func isServable(_ path: String, inside root: URL) -> Bool {
+        guard let opened = openServable(path, inside: root) else { return false }
+        try? opened.handle.close()
+        return true
     }
 
-    static func openRegular(_ path: String) -> (handle: FileHandle, length: UInt64)? {
-        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    /// 打开解析出的真实路径时用 O_NOFOLLOW，判断之后文件被换成链接也打不开；
+    /// 打开后再取文件的真实路径做同一个范围判断，挡住判断之后上级目录被换成链接。
+    static func openServable(_ path: String, inside root: URL) -> (handle: FileHandle, length: UInt64)? {
+        guard let rootPath = realPath(root.path),
+              let target = realPath(path),
+              isInside(target, root: rootPath)
+        else { return nil }
+        let fd = open(target, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         var info = stat()
-        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              let opened = realPath(of: fd), isInside(opened, root: rootPath)
+        else {
             close(fd)
             return nil
         }
         return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), UInt64(info.st_size))
+    }
+
+    private static func isInside(_ path: String, root: String) -> Bool {
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return path.hasPrefix(prefix)
+    }
+
+    private static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    private static func realPath(of fd: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buffer) != -1 else { return nil }
+        return String(cString: buffer)
     }
 }
 
@@ -266,6 +299,7 @@ struct LanHTTPResponse {
 
     struct FileSlice {
         var url: URL
+        var root: URL
         var offset: UInt64
         var length: UInt64
     }
@@ -344,18 +378,18 @@ enum LanHTTP {
             }
             return withCookie(LanHTTPResponse.html(200, LanPages.watch(item, token: token)), token: token)
         case .video(let id):
-            return fileResponse(request, url: library.videoURL(id), type: "video/mp4")
+            return fileResponse(request, url: library.videoURL(id), root: library.mediaRoot, type: "video/mp4")
         case .thumb(let id):
             guard let url = library.thumbnailURL(id) else {
                 return LanHTTPResponse.text(404, "没有封面")
             }
-            return fileResponse(request, url: url, type: mimeType(url))
+            return fileResponse(request, url: url, root: library.mediaRoot, type: mimeType(url))
         case .subtitle(let id):
             guard let url = library.subtitleURL(id) else {
                 return LanHTTPResponse.text(404, "没有字幕")
             }
             do {
-                guard let opened = LanFile.openRegular(url.path) else {
+                guard let opened = LanFile.openServable(url.path, inside: library.mediaRoot) else {
                     return LanHTTPResponse.text(404, "没有字幕")
                 }
                 defer { try? opened.handle.close() }
@@ -381,8 +415,8 @@ enum LanHTTP {
         }
     }
 
-    private static func fileResponse(_ request: LanHTTPRequest, url: URL?, type: String) -> LanHTTPResponse {
-        guard let url, let opened = LanFile.openRegular(url.path) else {
+    private static func fileResponse(_ request: LanHTTPRequest, url: URL?, root: URL, type: String) -> LanHTTPResponse {
+        guard let url, let opened = LanFile.openServable(url.path, inside: root) else {
             return LanHTTPResponse.text(404, "没有这部片")
         }
         try? opened.handle.close()
@@ -400,7 +434,7 @@ enum LanHTTP {
                     "Cache-Control": "private, max-age=3600"
                 ],
                 body: Data(),
-                file: LanHTTPResponse.FileSlice(url: url, offset: 0, length: length)
+                file: LanHTTPResponse.FileSlice(url: url, root: root, offset: 0, length: length)
             )
         case .partial(let start, let end):
             let slice = end - start + 1
@@ -414,7 +448,7 @@ enum LanHTTP {
                     "Cache-Control": "private, max-age=3600"
                 ],
                 body: Data(),
-                file: LanHTTPResponse.FileSlice(url: url, offset: start, length: slice)
+                file: LanHTTPResponse.FileSlice(url: url, root: root, offset: start, length: slice)
             )
         case .unsatisfiable:
             response = LanHTTPResponse(
@@ -817,7 +851,7 @@ final class LanPlayerServer {
     }
 
     private func writeFile(fd: Int32, _ file: LanHTTPResponse.FileSlice) {
-        guard let handle = LanFile.openRegular(file.url.path)?.handle else { return }
+        guard let handle = LanFile.openServable(file.url.path, inside: file.root)?.handle else { return }
         defer { try? handle.close() }
         do {
             try handle.seek(toOffset: file.offset)
@@ -863,27 +897,31 @@ final class LanPlayerServer {
 
 final class LanPlayerRuntime {
     private let queueFile: URL
+    private let mediaRoot: URL
     private let token: String
     private var server: LanPlayerServer?
 
     var port: UInt16 { server?.port ?? 0 }
 
-    init(queueFile: URL, tokenFile: URL) throws {
+    init(queueFile: URL, mediaRoot: URL, tokenFile: URL) throws {
         self.queueFile = queueFile
+        self.mediaRoot = mediaRoot
         self.token = try LanAccess.loadOrCreate(at: tokenFile)
     }
 
-    init(queueFile: URL, token: String) {
+    init(queueFile: URL, mediaRoot: URL, token: String) {
         self.queueFile = queueFile
+        self.mediaRoot = mediaRoot
         self.token = token
     }
 
     func start(hosts: [String], port: UInt16) throws {
         let queueFile = self.queueFile
+        let mediaRoot = self.mediaRoot
         let token = self.token
         let server = LanPlayerServer(port: port) { request in
             LanHTTP.handle(request, token: token) {
-                try LanLibrary.load(queueFile: queueFile)
+                try LanLibrary.load(queueFile: queueFile, mediaRoot: mediaRoot)
             }
         }
         try server.start(hosts: hosts)

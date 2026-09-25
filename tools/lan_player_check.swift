@@ -11,6 +11,8 @@ struct LanPlayerCheck {
         checkByteRange()
         checkHTTP()
         checkSymlinkEntriesRejected()
+        checkParentDirectorySymlinkRejected()
+        checkOutsideMediaRootRejected()
         checkBindRestrictedToPrivate()
         checkMethodsAndAuthOrder()
         print("lan_player_check=passed")
@@ -95,7 +97,7 @@ struct LanPlayerCheck {
             "/tmp/lan-player-ready.zh.srt",
             "/tmp/lan-player-partial.mp4"
         ]
-        let library = try! LanLibrary.load(queueJSON: json) { existing.contains($0) }
+        let library = try! LanLibrary.load(queueJSON: json, mediaRoot: URL(fileURLWithPath: "/tmp")) { existing.contains($0) }
         precondition(library.items.count == 1, "只列出已完成且文件存在的条目")
         precondition(library.items[0].id == readyID)
         precondition(library.items[0].title == "能看的片")
@@ -153,7 +155,8 @@ struct LanPlayerCheck {
             )],
             videos: [id: "/tmp/x.mp4"],
             thumbnails: [:],
-            subtitles: [:]
+            subtitles: [:],
+            mediaRoot: URL(fileURLWithPath: "/tmp")
         )
         let request = LanHTTPRequest(
             method: "GET",
@@ -221,7 +224,7 @@ struct LanPlayerCheck {
         let tokenFile = root.appendingPathComponent("token")
         try! Data("test-token-value".utf8).write(to: tokenFile)
 
-        let runtime = try! LanPlayerRuntime(queueFile: queue, tokenFile: tokenFile)
+        let runtime = try! LanPlayerRuntime(queueFile: queue, mediaRoot: root, tokenFile: tokenFile)
         try! runtime.start(hosts: ["127.0.0.1"], port: 0)
         defer { runtime.stop() }
         let port = runtime.port
@@ -258,119 +261,179 @@ struct LanPlayerCheck {
         precondition(String(data: leaked.body, encoding: .utf8)?.contains("should-not-read") != true)
     }
 
-    private static func checkSymlinkEntriesRejected() {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lan-player-symlink-\(UUID().uuidString)", isDirectory: true)
-        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+    /// 片库根目录 media 里放一部正常片；outside 是片库外的目录，放着不该被读到的内容。
+    /// 系统临时目录本身在 /var → /private/var 链接之下，顺带验证片库根目录自身经过链接也照常工作。
+    private struct MediaRootFixture {
+        let root: URL
+        let media: URL
+        let outside: URL
+        let normalVideo: URL
 
-        // 队列外的文件：比链接本身长，确认不会按链接长度截出前段。
-        let secretText = "SECRET-OUTSIDE-QUEUE " + String(repeating: "x", count: 200)
-        let outside = root.appendingPathComponent("outside.txt")
-        try! Data(secretText.utf8).write(to: outside)
-        let outsideSRT = root.appendingPathComponent("outside.zh.srt")
-        try! Data("1\n00:00:00,000 --> 00:00:01,000\nSECRET-OUTSIDE-QUEUE\n".utf8).write(to: outsideSRT)
+        static let secret = "SECRET-OUTSIDE-MEDIA-ROOT"
 
-        let linkedID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
-        let linkedVideo = root.appendingPathComponent("linked.mp4")
-        let linkedThumb = root.appendingPathComponent("linked.jpg")
-        let linkedSubtitle = root.appendingPathComponent("linked.zh.srt")
-        let fm = FileManager.default
-        try! fm.createSymbolicLink(at: linkedVideo, withDestinationURL: outside)
-        try! fm.createSymbolicLink(at: linkedThumb, withDestinationURL: outside)
-        try! fm.createSymbolicLink(at: linkedSubtitle, withDestinationURL: outsideSRT)
+        init(_ name: String) {
+            let fm = FileManager.default
+            root = fm.temporaryDirectory.appendingPathComponent("\(name)-\(UUID().uuidString)", isDirectory: true)
+            media = root.appendingPathComponent("media", isDirectory: true)
+            outside = root.appendingPathComponent("outside", isDirectory: true)
+            try! fm.createDirectory(at: media, withIntermediateDirectories: true)
+            try! fm.createDirectory(at: outside, withIntermediateDirectories: true)
+            // 比链接本身长，确认不会按链接长度截出前段。
+            let secretText = Self.secret + " " + String(repeating: "x", count: 200)
+            try! Data(secretText.utf8).write(to: outside.appendingPathComponent("movie.mp4"))
+            try! Data(secretText.utf8).write(to: outside.appendingPathComponent("movie.jpg"))
+            try! Data("1\n00:00:00,000 --> 00:00:01,000\n\(Self.secret)\n".utf8)
+                .write(to: outside.appendingPathComponent("movie.zh.srt"))
+            normalVideo = media.appendingPathComponent("normal.mp4")
+            try! Data("normal-video".utf8).write(to: normalVideo)
+        }
 
-        // 正常条目的视频是真文件，封面和字幕是链接：视频照常可看，封面和字幕不提供。
-        let normalID = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
-        let normalVideo = root.appendingPathComponent("normal.mp4")
-        try! Data("normal-video".utf8).write(to: normalVideo)
+        func remove() {
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
 
+    /// 同一套断言：登记的视频、封面、字幕路径解析后不在片库根目录之内，
+    /// 加载时不列出，读取时（模拟加载之后才被换掉）404，真实 HTTP 也拿不到内容；片库内的正常片照常播放。
+    private static func assertOutsideRejected(
+        _ fixture: MediaRootFixture,
+        video: String,
+        thumb: String,
+        subtitle: String,
+        label: String
+    ) {
+        let rejectedID = UUID()
+        let normalID = UUID()
         let json = """
         [
           {
-            "id": "\(linkedID.uuidString)",
-            "title": "链接片",
+            "id": "\(rejectedID.uuidString)",
+            "title": "片库外",
             "duration": 5,
             "state": "ready",
-            "localFilePath": "\(linkedVideo.path)",
-            "thumbnailFilePath": "\(linkedThumb.path)",
-            "subtitleFilePath": "\(linkedSubtitle.path)"
+            "localFilePath": "\(video)",
+            "thumbnailFilePath": "\(thumb)",
+            "subtitleFilePath": "\(subtitle)"
           },
           {
             "id": "\(normalID.uuidString)",
             "title": "正常片",
             "duration": 5,
             "state": "ready",
-            "localFilePath": "\(normalVideo.path)",
-            "thumbnailFilePath": "\(linkedThumb.path)",
-            "subtitleFilePath": "\(linkedSubtitle.path)"
+            "localFilePath": "\(fixture.normalVideo.path)",
+            "thumbnailFilePath": "\(thumb)",
+            "subtitleFilePath": "\(subtitle)"
           }
         ]
         """.data(using: .utf8)!
-        let queue = root.appendingPathComponent("queue.json")
+        let queue = fixture.root.appendingPathComponent("queue.json")
         try! json.write(to: queue)
 
-        // 加载队列时拒绝符号链接条目。
-        let library = try! LanLibrary.load(queueFile: queue)
-        precondition(library.videoURL(linkedID) == nil, "视频路径是符号链接的条目不得列出")
-        precondition(library.item(id: linkedID) == nil, "视频路径是符号链接的条目不得出现在片库")
-        precondition(library.videoURL(normalID)?.path == normalVideo.path, "正常视频照常列出")
-        precondition(library.thumbnailURL(normalID) == nil, "封面路径是符号链接时不得提供")
-        precondition(library.subtitleURL(normalID) == nil, "字幕路径是符号链接时不得提供")
+        let loaded = try! LanLibrary.load(queueFile: queue, mediaRoot: fixture.media)
+        precondition(loaded.item(id: rejectedID) == nil, "\(label)：条目不得出现在片库")
+        precondition(loaded.videoURL(rejectedID) == nil, "\(label)：视频不得列出")
+        precondition(loaded.videoURL(normalID)?.path == fixture.normalVideo.path, "\(label)：正常视频照常列出")
+        precondition(loaded.thumbnailURL(normalID) == nil, "\(label)：封面不得提供")
+        precondition(loaded.subtitleURL(normalID) == nil, "\(label)：字幕不得提供")
 
-        let token = "symlink-token"
-        func get(_ path: String, _ lib: LanLibrary) -> LanHTTPResponse {
-            LanHTTP.handle(
-                LanHTTPRequest(method: "GET", path: path, query: ["k": token], headers: [:], remoteHost: "127.0.0.1"),
-                token: token,
-                library: lib
-            )
+        let token = "media-root-token"
+        func leaks(_ body: Data) -> Bool {
+            String(data: body, encoding: .utf8)?.contains(MediaRootFixture.secret) == true
         }
-        func leaks(_ response: LanHTTPResponse) -> Bool {
-            if String(data: response.body, encoding: .utf8)?.contains("SECRET-OUTSIDE-QUEUE") == true { return true }
-            return response.file != nil
-        }
-
-        // 读文件时同样不跟随链接：模拟加载之后路径被换成链接。
         let swapped = LanLibrary(
-            items: [LanCatalogItem(id: linkedID, title: "链接片", durationText: "0:05", hasThumbnail: true, hasChineseSubtitle: true)],
-            videos: [linkedID: linkedVideo.path],
-            thumbnails: [linkedID: linkedThumb.path],
-            subtitles: [linkedID: linkedSubtitle.path]
+            items: [LanCatalogItem(id: rejectedID, title: "片库外", durationText: "0:05", hasThumbnail: true, hasChineseSubtitle: true)],
+            videos: [rejectedID: video],
+            thumbnails: [rejectedID: thumb],
+            subtitles: [rejectedID: subtitle],
+            mediaRoot: fixture.media
         )
         for kind in ["video", "thumb", "subtitle"] {
-            let response = get("/\(kind)/\(linkedID.uuidString)", swapped)
-            precondition(response.status == 404, "读取时遇到符号链接必须 404：\(kind)")
-            precondition(!leaks(response), "读取时遇到符号链接不得返回链接目标：\(kind)")
+            let response = LanHTTP.handle(
+                LanHTTPRequest(method: "GET", path: "/\(kind)/\(rejectedID.uuidString)", query: ["k": token], headers: [:], remoteHost: "127.0.0.1"),
+                token: token,
+                library: swapped
+            )
+            precondition(response.status == 404, "\(label)：读取时必须 404：\(kind) 实际 \(response.status)")
+            precondition(response.file == nil && !leaks(response.body), "\(label)：读取时不得返回片库外内容：\(kind)")
         }
 
-        // 真实 HTTP：带访问码请求链接条目，拿不到链接目标的内容。
-        let runtime = LanPlayerRuntime(queueFile: queue, token: token)
+        let runtime = LanPlayerRuntime(queueFile: queue, mediaRoot: fixture.media, token: token)
         try! runtime.start(hosts: ["127.0.0.1"], port: 0)
         defer { runtime.stop() }
         let session = URLSession(configuration: .ephemeral)
         let base = "http://127.0.0.1:\(runtime.port)"
         for path in [
-            "/video/\(linkedID.uuidString)",
-            "/thumb/\(linkedID.uuidString)",
-            "/subtitle/\(linkedID.uuidString)",
+            "/video/\(rejectedID.uuidString)",
+            "/thumb/\(rejectedID.uuidString)",
+            "/subtitle/\(rejectedID.uuidString)",
             "/thumb/\(normalID.uuidString)",
             "/subtitle/\(normalID.uuidString)"
         ] {
             let result = data(session, url("\(base)\(path)?k=\(token)"))
-            precondition(result.status == 404, "符号链接条目必须 404：\(path) 实际 \(result.status)")
-            precondition(
-                String(data: result.body, encoding: .utf8)?.contains("SECRET-OUTSIDE-QUEUE") != true,
-                "符号链接条目不得返回链接目标内容：\(path)"
-            )
+            precondition(result.status == 404, "\(label)：HTTP 必须 404：\(path) 实际 \(result.status)")
+            precondition(!leaks(result.body), "\(label)：HTTP 不得返回片库外内容：\(path)")
         }
         let normal = data(session, url("\(base)/video/\(normalID.uuidString)?k=\(token)"))
-        precondition(normal.status == 200 && normal.body == Data("normal-video".utf8), "正常视频照常播放")
+        precondition(normal.status == 200 && normal.body == Data("normal-video".utf8), "\(label)：正常视频照常播放")
+    }
+
+    /// 登记路径本身是指向片库外的符号链接。
+    private static func checkSymlinkEntriesRejected() {
+        let fixture = MediaRootFixture("lan-player-symlink")
+        defer { fixture.remove() }
+        let fm = FileManager.default
+        var paths: [String] = []
+        for name in ["movie.mp4", "movie.jpg", "movie.zh.srt"] {
+            let link = fixture.media.appendingPathComponent("linked-\(name)")
+            try! fm.createSymbolicLink(at: link, withDestinationURL: fixture.outside.appendingPathComponent(name))
+            paths.append(link.path)
+        }
+        assertOutsideRejected(fixture, video: paths[0], thumb: paths[1], subtitle: paths[2], label: "直接链接")
+    }
+
+    /// 登记路径最后一段是普通文件，但上级目录是指向片库外的符号链接。
+    private static func checkParentDirectorySymlinkRejected() {
+        let fixture = MediaRootFixture("lan-player-parent-link")
+        defer { fixture.remove() }
+        let library = fixture.media.appendingPathComponent("library", isDirectory: true)
+        try! FileManager.default.createSymbolicLink(at: library, withDestinationURL: fixture.outside)
+        assertOutsideRejected(
+            fixture,
+            video: library.appendingPathComponent("movie.mp4").path,
+            thumb: library.appendingPathComponent("movie.jpg").path,
+            subtitle: library.appendingPathComponent("movie.zh.srt").path,
+            label: "父目录链接"
+        )
+    }
+
+    /// 没有任何链接：队列直接登记片库外的普通文件，或用 .. 从片库里绕出去。
+    private static func checkOutsideMediaRootRejected() {
+        let fixture = MediaRootFixture("lan-player-outside")
+        defer { fixture.remove() }
+        assertOutsideRejected(
+            fixture,
+            video: fixture.outside.appendingPathComponent("movie.mp4").path,
+            thumb: fixture.outside.appendingPathComponent("movie.jpg").path,
+            subtitle: fixture.outside.appendingPathComponent("movie.zh.srt").path,
+            label: "片库外普通文件"
+        )
+        let dotdot = fixture.media.path + "/../outside/"
+        assertOutsideRejected(
+            fixture,
+            video: dotdot + "movie.mp4",
+            thumb: dotdot + "movie.jpg",
+            subtitle: dotdot + "movie.zh.srt",
+            label: "点点路径"
+        )
     }
 
     private static func checkBindRestrictedToPrivate() {
         for host in ["0.0.0.0", "8.8.8.8", "169.254.10.10", "172.32.0.1", "1.2.3.4"] {
-            let runtime = LanPlayerRuntime(queueFile: URL(fileURLWithPath: "/nonexistent/queue.json"), token: "t")
+            let runtime = LanPlayerRuntime(
+                queueFile: URL(fileURLWithPath: "/nonexistent/queue.json"),
+                mediaRoot: URL(fileURLWithPath: "/nonexistent"),
+                token: "t"
+            )
             var rejected = false
             do {
                 try runtime.start(hosts: [host], port: 0)
@@ -401,7 +464,7 @@ struct LanPlayerCheck {
         [{"id":"\(id.uuidString)","title":"片","duration":1,"state":"ready","localFilePath":"\(video.path)"}]
         """.utf8).write(to: queue)
         let token = "method-token"
-        let runtime = LanPlayerRuntime(queueFile: queue, token: token)
+        let runtime = LanPlayerRuntime(queueFile: queue, mediaRoot: root, token: token)
         try! runtime.start(hosts: ["127.0.0.1"], port: 0)
         defer { runtime.stop() }
         let session = URLSession(configuration: .ephemeral)

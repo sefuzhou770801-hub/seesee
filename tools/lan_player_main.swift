@@ -14,7 +14,7 @@ struct LanPlayerCommand {
                 exit(1)
             }
             let token = try LanAccess.loadOrCreate(at: options.tokenFile)
-            let runtime = LanPlayerRuntime(queueFile: options.queueFile, token: token)
+            let runtime = LanPlayerRuntime(queueFile: options.queueFile, mediaRoot: options.mediaRoot, token: token)
             let hosts = options.bind.map { [$0] } ?? LanNet.defaultHosts()
             try runtime.start(hosts: hosts, port: options.port)
             var printed = Set<String>()
@@ -37,12 +37,14 @@ private struct Options {
     var port: UInt16 = 18780
     var bind: String?
     var queueFile: URL
+    var mediaRoot: URL
     var tokenFile: URL
 
     static var usage: String {
         """
-        用法：scripts/lan_player.sh [--port 18780] [--bind 地址]
+        用法：scripts/lan_player.sh [--port 18780] [--bind 地址] [--media 片库目录]
         在 iPad Safari 打开启动时打印的地址。
+        --media 默认 ~/Movies/Replay，只提供真实路径在这个目录之内的文件。
         --bind 只接受 127.0.0.1 或局域网私有地址（10.x、172.16–31.x、192.168.x）。
 
         """
@@ -53,6 +55,9 @@ private struct Options {
             .appendingPathComponent("Replay", isDirectory: true)
         var options = Options(
             queueFile: support.appendingPathComponent("queue.json"),
+            mediaRoot: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Movies", isDirectory: true)
+                .appendingPathComponent("Replay", isDirectory: true),
             tokenFile: support.appendingPathComponent("lan-player-access-code")
         )
         var index = 1
@@ -86,6 +91,12 @@ private struct Options {
                     throw NSError(domain: "LanPlayer", code: 8, userInfo: [NSLocalizedDescriptionKey: "缺少队列路径"])
                 }
                 options.queueFile = URL(fileURLWithPath: arguments[index])
+            case "--media":
+                index += 1
+                guard index < arguments.count else {
+                    throw NSError(domain: "LanPlayer", code: 12, userInfo: [NSLocalizedDescriptionKey: "缺少片库目录"])
+                }
+                options.mediaRoot = URL(fileURLWithPath: arguments[index], isDirectory: true)
             case "--token-file":
                 index += 1
                 guard index < arguments.count else {
