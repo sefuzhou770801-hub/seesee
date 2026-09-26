@@ -411,11 +411,11 @@ compile_and_run sidebar_hittest \
     "$project_dir/Sources/Replay/SidebarQueueLayout.swift" \
     "$project_dir/tools/sidebar_hittest_check.swift"
 
-# 窄窗滑出左栏：挂载真实 ContentView，排除带 @main 的 ReplayApp。
+# 窄窗滑出左栏：挂载真实 ContentView，排除带 @main 的入口 ReplayEntry 与 ReplayApp。
 sidebar_slideout_sources=()
 while IFS= read -r file; do
     sidebar_slideout_sources+=("$file")
-done < <(find "$project_dir/Sources/Replay" -name '*.swift' ! -name 'ReplayApp.swift' | sort)
+done < <(find "$project_dir/Sources/Replay" -name '*.swift' ! -name 'ReplayApp.swift' ! -name 'ReplayEntry.swift' | sort)
 compile_and_run sidebar_slideout \
     -parse-as-library \
     "${sidebar_slideout_sources[@]}" \
@@ -556,6 +556,35 @@ compile_and_run media_folder_move_safety \
     "$project_dir/Sources/Replay/MediaLibraryMover.swift" \
     "$project_dir/Sources/Replay/QueueStore.swift" \
     "$project_dir/tools/media_folder_move_safety_check.swift"
+
+# 正在看的位置（JOS-583）：结果构造只取播放器时间；本机套接字鉴权与限制；MCP 桥接协议。
+compile_and_run now_playing_query \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/WatchQAContext.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/AgentLink.swift" \
+    "$project_dir/Sources/Replay/NowPlayingQuery.swift" \
+    "$project_dir/tools/now_playing_query_check.swift"
+
+compile_and_run agent_link \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/AgentLink.swift" \
+    "$project_dir/tools/agent_link_check.swift"
+
+compile_and_run seesee_mcp_bridge \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/WatchQAContext.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/AgentLink.swift" \
+    "$project_dir/Sources/Replay/NowPlayingQuery.swift" \
+    "$project_dir/Sources/Replay/SeeseeMCPBridge.swift" \
+    "$project_dir/tools/seesee_mcp_bridge_check.swift"
 
 compile_and_run lan_player \
     "$project_dir/tools/LanPlayer.swift" \
