@@ -1004,6 +1004,7 @@ private struct VideoDetail: View {
     @FocusState private var isQuestionFieldFocused: Bool
     @State private var qaEntries: [WatchQAEntry] = []
     @State private var qaLoadTask: Task<Void, Never>?
+    @State private var nowPlayingToken: UUID?
     let item: WatchItem
     let sidebarCollapsed: Bool
     let windowWidth: CGFloat
@@ -1039,7 +1040,10 @@ private struct VideoDetail: View {
             skipHUDDismissalTask?.cancel()
             PlaybackCommandCenter.shared.setAskOverlayDismissHandler(nil)
             watchQA.dismiss(resume: false)
+            unregisterNowPlaying()
         }
+        .onAppear { syncNowPlaying() }
+        .onChange(of: nowPlayingEntry) { _ in syncNowPlaying() }
         .onChange(of: watchQA.isPresented) { presented in
             if presented {
                 DispatchQueue.main.async {
@@ -1361,6 +1365,31 @@ private struct VideoDetail: View {
             RoundedRectangle(cornerRadius: OpenMyChrome.radiusXl, style: .continuous)
                 .strokeBorder(OpenMyChrome.hair)
         }
+    }
+
+    /// 给本机查询通道登记的当前条目；条件与 playerSurface 挂出 LocalVideoPlayer 的条件一致。
+    private var nowPlayingEntry: NowPlayingEntry? {
+        guard !(store.isMediaFolderDisconnected && displayedItem.state == .ready),
+              isItemPlayable,
+              let fileURL = displayedItem.localFileURL else { return nil }
+        return NowPlayingEntry(item: displayedItem, fileURL: fileURL, subtitleTrack: subtitleTrack)
+    }
+
+    private func syncNowPlaying() {
+        guard let entry = nowPlayingEntry else {
+            unregisterNowPlaying()
+            return
+        }
+        if let nowPlayingToken, NowPlayingRegistry.shared.update(nowPlayingToken, entry: entry) {
+            return
+        }
+        nowPlayingToken = NowPlayingRegistry.shared.register(entry)
+    }
+
+    private func unregisterNowPlaying() {
+        guard let nowPlayingToken else { return }
+        NowPlayingRegistry.shared.unregister(nowPlayingToken)
+        self.nowPlayingToken = nil
     }
 
     /// 直接读队列当前值，不靠 `let item` 的 onChange 边沿。

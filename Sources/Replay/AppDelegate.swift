@@ -28,10 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let inbox = URLInbox()
     private var pasteMonitor: Any?
     private var mediaKeyMonitor: Any?
+    private var agentLink: AgentLinkServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         OpenMyChrome.applyAppearance()
         SystemMediaController.shared.start()
+        startAgentLink()
         mediaKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .systemDefined) { event in
             guard let action = HardwareMediaKeyEventPolicy.action(
                 subtype: Int(event.subtype.rawValue),
@@ -122,11 +124,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         SystemMediaController.shared.stop()
+        agentLink?.stop()
+        agentLink = nil
         if let pasteMonitor {
             NSEvent.removeMonitor(pasteMonitor)
         }
         if let mediaKeyMonitor {
             NSEvent.removeMonitor(mediaKeyMonitor)
+        }
+    }
+
+    /// 本机只读查询通道（JOS-583）：给 `Replay --mcp-stdio` 桥接进程查正在看的位置、字幕和画面。
+    /// 路径被别的文件占住或过长时不启动，只记日志，不影响播放。
+    private func startAgentLink() {
+        let server = AgentLinkServer(
+            paths: .standard(),
+            provider: NowPlayingAgentProvider(),
+            log: { NSLog("seesee 查询通道：%@", $0) }
+        )
+        if server.start() == .started {
+            agentLink = server
         }
     }
 
