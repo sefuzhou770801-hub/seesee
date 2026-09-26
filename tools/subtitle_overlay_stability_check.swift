@@ -66,6 +66,9 @@ struct SubtitleOverlayStabilityCheck {
         for scene in scenes {
             failures += run(scene)
         }
+        for interruption in Interruption.allCases {
+            failures += run(interruption)
+        }
         if failures.isEmpty {
             print("subtitle_overlay_stability=passed")
             return
@@ -78,7 +81,7 @@ struct SubtitleOverlayStabilityCheck {
 
     @MainActor
     static func run(_ scene: Scene) -> [String] {
-        let host = NSView(frame: NSRect(origin: .zero, size: scene.surface))
+        let host = ProbeHost(frame: NSRect(origin: .zero, size: scene.surface))
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor(calibratedRed: 0.18, green: 0.24, blue: 0.3, alpha: 1).cgColor
         let window = NSWindow(
@@ -96,6 +99,7 @@ struct SubtitleOverlayStabilityCheck {
 
         let overlay = PlayerSubtitleOverlayView()
         overlay.install(in: host)
+        host.overlay = overlay
         host.layoutSubtreeIfNeeded()
 
         // 冻结宿主层的动画时钟，逐帧手动推进：取帧、导出图片的耗时不会让动画跑到前面去。
@@ -137,6 +141,10 @@ struct SubtitleOverlayStabilityCheck {
             setClock(clock)
             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
             let after = sample(t: -1, overlay: overlay, host: host)
+            let leftover = overlay.layer.map { snapshotLayers(in: $0).count } ?? 0
+            if leftover > 0 {
+                failures.append("[\(scene.name)] 第 \(index) 次换句：转场结束后仍有 \(leftover) 个旧句快照层没有移除")
+            }
 
             if verbose {
                 print("[\(scene.name)] 第 \(index) 次换句 -> \(text.split(separator: "\n").first ?? "")")
@@ -187,6 +195,87 @@ struct SubtitleOverlayStabilityCheck {
                     failures.append("\(label)：不做动画时应直接替换，却出现了旧句残影或新句淡入")
                 }
             }
+        }
+        return failures
+    }
+
+    /// 换句后 0.05 秒（交叉渐隐进行到一半）发生的、不走交叉渐隐的变化。
+    enum Interruption: String, CaseIterable {
+        case seek = "拖动进度条"
+        case subtitlesOffOn = "关字幕再开"
+        case resize = "窗口变窄"
+    }
+
+    /// 打断的那一刻旧句快照必须立即消失、新句立即不透明，不能偏离原位继续淡出。
+    @MainActor
+    static func run(_ interruption: Interruption) -> [String] {
+        let host = ProbeHost(frame: NSRect(x: 0, y: 0, width: 800, height: 450))
+        host.wantsLayer = true
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+
+        let overlay = PlayerSubtitleOverlayView()
+        overlay.install(in: host)
+        host.overlay = overlay
+        host.layoutSubtreeIfNeeded()
+        guard let clockLayer = host.layer, let overlayLayer = overlay.layer else { fatalError("宿主没有 layer") }
+        func setClock(_ time: CFTimeInterval) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            clockLayer.speed = 0
+            clockLayer.timeOffset = time
+            CATransaction.commit()
+            CATransaction.flush()
+        }
+        func presentation(_ index: Int) -> VideoSubtitlePresentation {
+            let text = bilingualSteps[index]
+            return VideoSubtitlePresentation(
+                id: VideoSubtitleCueID(startTime: Double(index), endTime: Double(index) + 1, text: text),
+                text: text
+            )
+        }
+
+        setClock(100)
+        overlay.setPresentation(presentation(0), animated: false)
+        host.layoutSubtreeIfNeeded()
+        overlay.setPresentation(presentation(1), animated: true)
+        CATransaction.flush()
+        setClock(100.05)
+        let label = "[中途\(interruption.rawValue)]"
+        guard !snapshotLayers(in: overlayLayer).isEmpty else {
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return [] }
+            return ["\(label)：换句后 0.05 秒应当正在交叉渐隐，却没有旧句快照，场景无效"]
+        }
+
+        switch interruption {
+        case .seek:
+            overlay.setPresentation(presentation(3), animated: false)
+        case .subtitlesOffOn:
+            overlay.setPresentation(nil, animated: false)
+            overlay.setPresentation(presentation(3), animated: true)
+        case .resize:
+            window.setContentSize(NSSize(width: 600, height: 450))
+        }
+        host.layoutSubtreeIfNeeded()
+        CATransaction.flush()
+
+        var failures: [String] = []
+        let leftover = snapshotLayers(in: overlayLayer).count
+        if leftover > 0 {
+            failures.append("\(label)：打断后旧句快照没有立即移除，还剩 \(leftover) 个")
+        }
+        let live = sample(t: 0, overlay: overlay, host: host)
+        // 关字幕再开是整条浮层按原样淡入，只检查快照；另两种是直接替换，新句必须立即不透明。
+        if interruption != .subtitlesOffOn, live.liveOpacity < 0.99 {
+            failures.append("\(label)：打断后新句应立即不透明，实际透明度 \(String(format: "%.2f", live.liveOpacity))")
+        }
+        if verbose {
+            print("\(label) 打断后快照层 \(leftover) 个，新句透明度 \(String(format: "%.2f", live.liveOpacity))")
         }
         return failures
     }
@@ -314,5 +403,20 @@ struct SubtitleOverlayStabilityCheck {
 
     static func fmt(_ value: CGFloat) -> String {
         String(format: "%.1f", value)
+    }
+}
+
+/// 照 PictureInPicturePlayerView 的写法：宿主尺寸变化和布局时把自身宽度告诉浮层。
+final class ProbeHost: NSView {
+    weak var overlay: PlayerSubtitleOverlayView?
+
+    override func layout() {
+        super.layout()
+        overlay?.updateForSurfaceWidth(bounds.width)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        overlay?.updateForSurfaceWidth(newSize.width)
     }
 }

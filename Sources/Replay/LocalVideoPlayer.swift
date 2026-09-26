@@ -68,6 +68,7 @@ final class PlayerSubtitleOverlayView: NSView {
     }
 
     func updateForSurfaceWidth(_ width: CGFloat) {
+        if width != surfaceWidth { finishCrossFade() }
         surfaceWidth = width
         applyLayoutDecision()
         needsLayout = true
@@ -91,6 +92,7 @@ final class PlayerSubtitleOverlayView: NSView {
             let outgoing: OutgoingSnapshot? = (chrome == .replace && shouldAnimate && !isHidden && window != nil)
                 ? captureOutgoingSnapshot()
                 : nil
+            if outgoing == nil { finishCrossFade() }
             applyLineTexts(from: presentation)
             isHidden = false
             applyLayoutDecision()
@@ -112,6 +114,7 @@ final class PlayerSubtitleOverlayView: NSView {
         }
 
         guard chrome == .fadeOut, shouldAnimate, !isHidden else {
+            finishCrossFade()
             alphaValue = 0
             isHidden = true
             clearText()
@@ -136,7 +139,11 @@ final class PlayerSubtitleOverlayView: NSView {
         // 原生样式：整块大底框退役，每行文字各自一条贴身底条（见下方 pill 装配）。
         layer?.backgroundColor = NSColor.clear.cgColor
         // 旧句快照挂在本层上，比新句宽或高时也不能被裁掉。
-        layer?.masksToBounds = false
+        if #available(macOS 14.0, *) {
+            clipsToBounds = false
+        } else {
+            layer?.masksToBounds = false
+        }
         alphaValue = 0
         isHidden = true
 
@@ -240,6 +247,14 @@ final class PlayerSubtitleOverlayView: NSView {
         }
     }
 
+    /// 不走交叉渐隐的变化（直接替换、立即隐藏、宿主宽度变化）要立刻到位：
+    /// 快照按换句前的宿主位置摆放，浮层重新居中后会偏离原位，所以连同新句淡入一起收掉。
+    private func finishCrossFade() {
+        outgoingLayer?.removeFromSuperlayer()
+        outgoingLayer = nil
+        textStack.layer?.removeAnimation(forKey: "fade-in")
+    }
+
     private func applyLineTexts(from presentation: VideoSubtitlePresentation) {
         let lines = VideoSubtitlePresentation.displayLines(from: presentation.text)
         // 中西文垫窄空格是全局排版规则，浮层与右栏一致。
@@ -264,7 +279,9 @@ final class PlayerSubtitleOverlayView: NSView {
     private func applyLayoutDecision() {
         let texts = displayedLines
         guard !texts.isEmpty else { return }
-        surfaceWidth = resolvedSurfaceWidth()
+        let width = resolvedSurfaceWidth()
+        if width != surfaceWidth { finishCrossFade() }
+        surfaceWidth = width
         let decision = SubtitleOverlayLayout.resolve(lines: texts, surfaceWidth: surfaceWidth)
         widthConstraint?.constant = decision.overlayWidth
         let fields = [sourceTextField, translationTextField].filter {
