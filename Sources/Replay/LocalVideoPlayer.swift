@@ -883,6 +883,18 @@ enum PlaybackAudioPolicy {
     // stall predictor after a rate change only adds latency and cannot improve
     // buffering for these local files.
     static let waitsToMinimizeStalling = false
+
+    // 主窗口、全屏和悬浮小窗共用这一个播放器，在这里统一配置。
+    static func makePlayer(playing playerItem: AVPlayerItem) -> AVPlayer {
+        playerItem.audioTimePitchAlgorithm = timePitchAlgorithm
+        let player = AVPlayer(playerItem: playerItem)
+        player.allowsExternalPlayback = true
+        player.automaticallyWaitsToMinimizeStalling = waitsToMinimizeStalling
+        // macOS 上默认是 false，播放时屏幕会按系统时间熄灭；设为 true 后
+        // AVPlayer 只在播放期间阻止熄屏，暂停或停止后自动恢复系统设置。
+        player.preventsDisplaySleepDuringVideoPlayback = true
+        return player
+    }
 }
 
 enum PlaybackVolumePreference {
@@ -1247,10 +1259,7 @@ struct LocalVideoPlayer: NSViewRepresentable {
             seekSession.invalidate()
             preferredRate = PlaybackRatePreference.load()
             let playerItem = AVPlayerItem(url: url)
-            playerItem.audioTimePitchAlgorithm = PlaybackAudioPolicy.timePitchAlgorithm
-            let player = AVPlayer(playerItem: playerItem)
-            player.allowsExternalPlayback = true
-            player.automaticallyWaitsToMinimizeStalling = PlaybackAudioPolicy.waitsToMinimizeStalling
+            let player = PlaybackAudioPolicy.makePlayer(playing: playerItem)
             player.volume = Float(PlaybackVolumePreference.load())
             self.player = player
             playerView = view
