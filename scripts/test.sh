@@ -411,11 +411,11 @@ compile_and_run sidebar_hittest \
     "$project_dir/Sources/Replay/SidebarQueueLayout.swift" \
     "$project_dir/tools/sidebar_hittest_check.swift"
 
-# 窄窗滑出左栏：挂载真实 ContentView，排除带 @main 的 ReplayApp。
+# 窄窗滑出左栏：挂载真实 ContentView，排除带 @main 的入口 ReplayEntry 与 ReplayApp。
 sidebar_slideout_sources=()
 while IFS= read -r file; do
     sidebar_slideout_sources+=("$file")
-done < <(find "$project_dir/Sources/Replay" -name '*.swift' ! -name 'ReplayApp.swift' | sort)
+done < <(find "$project_dir/Sources/Replay" -name '*.swift' ! -name 'ReplayApp.swift' ! -name 'ReplayEntry.swift' | sort)
 compile_and_run sidebar_slideout \
     -parse-as-library \
     "${sidebar_slideout_sources[@]}" \
@@ -557,6 +557,35 @@ compile_and_run media_folder_move_safety \
     "$project_dir/Sources/Replay/QueueStore.swift" \
     "$project_dir/tools/media_folder_move_safety_check.swift"
 
+# 正在看的位置（JOS-583）：结果构造只取播放器时间；本机套接字鉴权与限制；MCP 桥接协议。
+compile_and_run now_playing_query \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/WatchQAContext.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/AgentLink.swift" \
+    "$project_dir/Sources/Replay/NowPlayingQuery.swift" \
+    "$project_dir/tools/now_playing_query_check.swift"
+
+compile_and_run agent_link \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/AgentLink.swift" \
+    "$project_dir/tools/agent_link_check.swift"
+
+compile_and_run seesee_mcp_bridge \
+    "$project_dir/Sources/Replay/WatchItem.swift" \
+    "$project_dir/Sources/Replay/ChapterMetadata.swift" \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/WatchQAContext.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/ReplayMigration.swift" \
+    "$project_dir/Sources/Replay/AgentLink.swift" \
+    "$project_dir/Sources/Replay/NowPlayingQuery.swift" \
+    "$project_dir/Sources/Replay/SeeseeMCPBridge.swift" \
+    "$project_dir/tools/seesee_mcp_bridge_check.swift"
+
 compile_and_run lan_player \
     "$project_dir/tools/LanPlayer.swift" \
     "$project_dir/tools/lan_player_check.swift"
@@ -585,6 +614,16 @@ for bind_host in 0.0.0.0 8.8.8.8; do
     fi
 done
 echo "lan_player_cli_bind=passed"
+
+# 看视频时屏幕不熄：主窗口、全屏、悬浮小窗共用的播放器必须阻止播放期间熄屏。
+compile_and_run display_sleep \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleOverlayLayout.swift" \
+    "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
+    "$project_dir/Sources/Replay/SubtitleDispatch.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/LocalVideoPlayer.swift" \
+    "$project_dir/tools/display_sleep_check.swift"
 
 # 播放器字幕换句零位移：离屏驱动真实浮层，逐帧断言底边、底条尺寸与旧句位置。
 compile_and_run subtitle_overlay_stability \

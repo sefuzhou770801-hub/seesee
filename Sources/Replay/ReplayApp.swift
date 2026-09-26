@@ -24,7 +24,7 @@ private struct MainWindowOpenBridge: View {
     }
 }
 
-@main
+/// 入口在 ReplayEntry：先分流 `--mcp-stdio`，其余情况才启动应用。
 struct ReplayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = QueueStore()
