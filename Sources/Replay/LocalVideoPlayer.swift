@@ -2,16 +2,13 @@ import AVKit
 import MediaPlayer
 import SwiftUI
 
-private final class PlayerSubtitleOverlayView: NSView {
+final class PlayerSubtitleOverlayView: NSView {
     private let sourceTextField = NSTextField(labelWithString: "")
     private let translationTextField = NSTextField(labelWithString: "")
     private let textStack = NSStackView()
-    /// 推挤滚动的裁剪容器：纸带越界的部分在这里被裁掉。
-    private let clipView = NSView()
     /// 每行一条贴身底条，对齐原生字幕的观感。
     private let sourcePill = NSView()
     private let translationPill = NSView()
-    /// 滚动期间挂在裁剪层上的上下渐隐，滚完即摘。
     private(set) var presentation: VideoSubtitlePresentation?
     private var animationGeneration = 0
     private var surfaceWidth: CGFloat = 1
@@ -90,9 +87,9 @@ private final class PlayerSubtitleOverlayView: NSView {
         let shouldAnimate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
         if let presentation {
-            // 换句走推挤滚动，对齐自带滚动字幕的观感：新句把旧句顶出框外。
-            let rollSnapshot: RollSnapshot? = (chrome == .replace && shouldAnimate && !isHidden && window != nil)
-                ? captureRollSnapshot()
+            // 换句走纯渐隐：先把旧句拍成快照，新句布局就位后旧句快照在原位淡出。
+            let outgoing: OutgoingSnapshot? = (chrome == .replace && shouldAnimate && !isHidden && window != nil)
+                ? captureOutgoingSnapshot()
                 : nil
             applyLineTexts(from: presentation)
             isHidden = false
@@ -107,8 +104,8 @@ private final class PlayerSubtitleOverlayView: NSView {
                 }
             } else {
                 alphaValue = 1
-                if let rollSnapshot {
-                    runPushRoll(with: rollSnapshot)
+                if let outgoing {
+                    runCrossFade(from: outgoing)
                 }
             }
             return
@@ -138,6 +135,8 @@ private final class PlayerSubtitleOverlayView: NSView {
         wantsLayer = true
         // 原生样式：整块大底框退役，每行文字各自一条贴身底条（见下方 pill 装配）。
         layer?.backgroundColor = NSColor.clear.cgColor
+        // 旧句快照挂在本层上，比新句宽或高时也不能被裁掉。
+        layer?.masksToBounds = false
         alphaValue = 0
         isHidden = true
 
@@ -150,17 +149,6 @@ private final class PlayerSubtitleOverlayView: NSView {
             textField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
             textField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         }
-
-        clipView.translatesAutoresizingMaskIntoConstraints = false
-        clipView.wantsLayer = true
-        clipView.layer?.masksToBounds = true
-        addSubview(clipView)
-        NSLayoutConstraint.activate([
-            clipView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            clipView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            clipView.topAnchor.constraint(equalTo: topAnchor),
-            clipView.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
 
         for (pill, field) in [(sourcePill, sourceTextField), (translationPill, translationTextField)] {
             pill.translatesAutoresizingMaskIntoConstraints = false
@@ -184,62 +172,57 @@ private final class PlayerSubtitleOverlayView: NSView {
         textStack.spacing = 4
         textStack.addArrangedSubview(sourcePill)
         textStack.addArrangedSubview(translationPill)
-        clipView.addSubview(textStack)
+        addSubview(textStack)
         NSLayoutConstraint.activate([
-            textStack.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
-            textStack.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
-            textStack.topAnchor.constraint(equalTo: clipView.topAnchor, constant: 4),
-            textStack.bottomAnchor.constraint(equalTo: clipView.bottomAnchor, constant: -4)
+            textStack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            textStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            textStack.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            textStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4)
         ])
     }
 
-    private static let rollDuration: TimeInterval = 0.25
-    private static let rollTiming = CAMediaTimingFunction(name: .easeInEaseOut)
-    private weak var rollGhostLayer: CALayer?
+    /// 换句交叉渐隐时长：旧句与新句同时处于半透明的时间尽量短，读字不糊。
+    private static let crossFadeDuration: TimeInterval = 0.12
+    private static let crossFadeTiming = CAMediaTimingFunction(name: .easeInEaseOut)
+    private weak var outgoingLayer: CALayer?
 
-    private struct RollSnapshot {
+    private struct OutgoingSnapshot {
         let image: CGImage
-        let size: NSSize
+        /// 换句前旧句在宿主视图里的位置；浮层以底边和水平中线固定，旧句必须原地淡出。
+        let frameInHost: NSRect
     }
 
-    private func captureRollSnapshot() -> RollSnapshot? {
-        guard textStack.frame.width > 0,
+    private func captureOutgoingSnapshot() -> OutgoingSnapshot? {
+        guard let host = superview,
+              textStack.frame.width > 0,
               let rep = textStack.bitmapImageRepForCachingDisplay(in: textStack.bounds) else { return nil }
         textStack.cacheDisplay(in: textStack.bounds, to: rep)
         guard let image = rep.cgImage else { return nil }
-        return RollSnapshot(image: image, size: textStack.bounds.size)
+        return OutgoingSnapshot(image: image, frameInHost: host.convert(textStack.bounds, from: textStack))
     }
 
     /// 纯渐隐：旧句原地淡出、新句原地淡入，零位移（三方案对比老板选定 C）。
-    /// 交叉期两句同位半透明叠印，全场最安静；框高变化与渐隐共用同一节奏。
-    private func runPushRoll(with snapshot: RollSnapshot) {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.rollDuration
-            context.timingFunction = Self.rollTiming
-            context.allowsImplicitAnimation = true
-            layoutSubtreeIfNeeded()
-        }
-        guard let clipLayer = clipView.layer, let stackLayer = textStack.layer else { return }
-        rollGhostLayer?.removeFromSuperlayer()
+    /// 新句的宽高、行数直接到位，不做尺寸动画；只有两句的透明度在变。
+    private func runCrossFade(from outgoing: OutgoingSnapshot) {
+        guard let host = superview, let overlayLayer = layer, let stackLayer = textStack.layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        host.layoutSubtreeIfNeeded()
+        outgoingLayer?.removeFromSuperlayer()
 
-        let newFrame = textStack.frame
         let ghost = CALayer()
-        ghost.contents = snapshot.image
+        ghost.contents = outgoing.image
         ghost.contentsScale = window?.backingScaleFactor ?? 2
-        ghost.frame = NSRect(
-            x: newFrame.midX - snapshot.size.width / 2,
-            y: newFrame.maxY - snapshot.size.height,
-            width: snapshot.size.width,
-            height: snapshot.size.height
-        )
-        clipLayer.addSublayer(ghost)
-        rollGhostLayer = ghost
+        ghost.frame = convert(outgoing.frameInHost, from: host)
+        overlayLayer.addSublayer(ghost)
+        outgoingLayer = ghost
+        CATransaction.commit()
 
         let fadeOut = CABasicAnimation(keyPath: "opacity")
         fadeOut.fromValue = 1
         fadeOut.toValue = 0
-        fadeOut.duration = Self.rollDuration
-        fadeOut.timingFunction = Self.rollTiming
+        fadeOut.duration = Self.crossFadeDuration
+        fadeOut.timingFunction = Self.crossFadeTiming
         fadeOut.fillMode = .forwards
         fadeOut.isRemovedOnCompletion = false
         ghost.opacity = 0
@@ -248,11 +231,11 @@ private final class PlayerSubtitleOverlayView: NSView {
         let fadeIn = CABasicAnimation(keyPath: "opacity")
         fadeIn.fromValue = 0
         fadeIn.toValue = 1
-        fadeIn.duration = Self.rollDuration
-        fadeIn.timingFunction = Self.rollTiming
+        fadeIn.duration = Self.crossFadeDuration
+        fadeIn.timingFunction = Self.crossFadeTiming
         stackLayer.add(fadeIn, forKey: "fade-in")
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rollDuration) { [weak ghost] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.crossFadeDuration) { [weak ghost] in
             ghost?.removeFromSuperlayer()
         }
     }
