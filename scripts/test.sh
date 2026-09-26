@@ -624,3 +624,13 @@ compile_and_run display_sleep \
     "$project_dir/Sources/Replay/SponsorSkip.swift" \
     "$project_dir/Sources/Replay/LocalVideoPlayer.swift" \
     "$project_dir/tools/display_sleep_check.swift"
+
+# 播放器字幕换句零位移：离屏驱动真实浮层，逐帧断言底边、底条尺寸与旧句位置。
+compile_and_run subtitle_overlay_stability \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleOverlayLayout.swift" \
+    "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
+    "$project_dir/Sources/Replay/SubtitleDispatch.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/LocalVideoPlayer.swift" \
+    "$project_dir/tools/subtitle_overlay_stability_check.swift"
