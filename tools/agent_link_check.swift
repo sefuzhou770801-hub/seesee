@@ -34,7 +34,13 @@ struct AgentLinkCheck {
 
         func answer(_ request: AgentLinkRequest) -> AgentLinkReply {
             lock.lock(); _requests.append(request); lock.unlock()
-            return .success(["query": request.query.rawValue, "positionSeconds": 42])
+            return .success([
+                "query": request.query.rawValue,
+                "positionSeconds": 42,
+                "videoOpen": true,
+                "playing": false,
+                "state": "paused"
+            ])
         }
     }
 
@@ -178,6 +184,17 @@ struct AgentLinkCheck {
             preconditionFailure("正确令牌应拿到结果")
         }
         precondition(payload["query"] as? String == "subtitles", "结果来自查询提供者：\(payload)")
+        // 暂停时的状态字段经过套接字后仍是布尔值和字符串，false 不会变成 0。
+        for key in ["videoOpen", "playing"] {
+            precondition(
+                payload[key].map { CFGetTypeID($0 as CFTypeRef) == CFBooleanGetTypeID() } == true,
+                "\(key) 经过套接字后仍是布尔值：\(payload)"
+            )
+        }
+        precondition(
+            payload["videoOpen"] as? Bool == true && payload["playing"] as? Bool == false && payload["state"] as? String == "paused",
+            "暂停状态字段原样送达：\(payload)"
+        )
         precondition(provider.requests.count == 1, "提供者被调用一次")
 
         let wrong = String(repeating: "0", count: 64)

@@ -109,13 +109,26 @@ struct NowPlayingQueryCheck {
         precondition(NowPlayingQuery.context(entry: entry, playerFileURL: fileURL, clock: badClock) == nil, "播放器时间无效时不编造位置")
 
         let result = NowPlayingQuery.nowPlaying(nil)
-        precondition(result["playing"] as? Bool == false, "没有在播放：playing 为 false")
+        assertNoVideo(result, "now_playing")
         precondition(result["message"] as? String == "没有在播放", "没有在播放：中文说明")
         precondition(result["positionSeconds"] == nil, "没有在播放时不返回位置")
 
         let subtitles = NowPlayingQuery.subtitles(nil, before: 30, after: 30)
-        precondition(subtitles["playing"] as? Bool == false && subtitles["message"] as? String == "没有在播放", "字幕查询同样回答没有在播放")
+        assertNoVideo(subtitles, "字幕")
+        precondition(subtitles["message"] as? String == "没有在播放", "字幕查询同样回答没有在播放")
         precondition(subtitles["cues"] == nil, "没有在播放时不返回字幕")
+    }
+
+    /// 没有视频打开：三个状态字段固定为 false、false、none。
+    private static func assertNoVideo(_ result: [String: Any], _ label: String) {
+        assertPlayback(result, videoOpen: false, playing: false, state: "none", "\(label) 没有视频")
+    }
+
+    /// `playing` 只在真的在播放时为 true；`videoOpen` 表示有视频打开。
+    private static func assertPlayback(_ result: [String: Any], videoOpen: Bool, playing: Bool, state: String, _ label: String) {
+        precondition(result["videoOpen"] as? Bool == videoOpen, "\(label)：videoOpen 应为 \(videoOpen)：\(result)")
+        precondition(result["playing"] as? Bool == playing, "\(label)：playing 应为 \(playing)：\(result)")
+        precondition(result["state"] as? String == state, "\(label)：state 应为 \(state)：\(result)")
     }
 
     private static func checkPlayerFileMustMatchEntry() {
@@ -135,8 +148,7 @@ struct NowPlayingQueryCheck {
 
     private static func checkNowPlayingFields() {
         let result = NowPlayingQuery.nowPlaying(context(position: 123.456, isPlaying: false, rate: 1.5))
-        precondition(result["playing"] as? Bool == true, "播放器存在即 playing 为 true：\(result)")
-        precondition(result["state"] as? String == "paused", "暂停时 state 为 paused：\(result)")
+        assertPlayback(result, videoOpen: true, playing: false, state: "paused", "now_playing 暂停")
         precondition(result["title"] as? String == "测试视频" && result["author"] as? String == "测试作者", "标题作者：\(result)")
         precondition(result["sourceURL"] as? String == "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "来源链接：\(result)")
         precondition(result["videoID"] as? String == "dQw4w9WgXcQ", "YouTube 视频编号：\(result)")
@@ -148,7 +160,7 @@ struct NowPlayingQueryCheck {
         precondition(double(result["rate"]) == 1.5, "倍速：\(result)")
 
         let playing = NowPlayingQuery.nowPlaying(context(position: 1, isPlaying: true))
-        precondition(playing["state"] as? String == "playing", "播放中 state 为 playing：\(playing)")
+        assertPlayback(playing, videoOpen: true, playing: true, state: "playing", "now_playing 播放中")
 
         let noDuration = NowPlayingQuery.nowPlaying(context(position: 1, duration: nil))
         precondition(double(noDuration["durationSeconds"]) == 600, "播放器没有时长时退回条目时长：\(noDuration)")
@@ -181,7 +193,10 @@ struct NowPlayingQueryCheck {
 
     private static func checkSubtitleWindowAndOrder() {
         let result = NowPlayingQuery.subtitles(context(position: 42), before: 30, after: 30)
-        precondition(result["playing"] as? Bool == true && result["hasSubtitles"] as? Bool == true, "有字幕：\(result)")
+        assertPlayback(result, videoOpen: true, playing: true, state: "playing", "字幕播放中")
+        precondition(result["hasSubtitles"] as? Bool == true, "有字幕：\(result)")
+        let pausedSubtitles = NowPlayingQuery.subtitles(context(position: 42, isPlaying: false), before: 30, after: 30)
+        assertPlayback(pausedSubtitles, videoOpen: true, playing: false, state: "paused", "字幕暂停")
         let cues = result["cues"] as? [[String: Any]] ?? []
         let starts = cues.compactMap { double($0["start"]) }
         precondition(starts == [10, 40, 43.5, 70], "窗口 [12,72] 内按开始时间排序，恰好在 12 秒结束的那条算在窗口内：\(starts)")
@@ -222,7 +237,7 @@ struct NowPlayingQueryCheck {
 
     private static func checkNoSubtitleTrack() {
         let result = NowPlayingQuery.subtitles(context(position: 42, track: nil), before: 30, after: 30)
-        precondition(result["playing"] as? Bool == true, "没有字幕轨也在播放：\(result)")
+        assertPlayback(result, videoOpen: true, playing: true, state: "playing", "没有字幕轨")
         precondition(result["hasSubtitles"] as? Bool == false, "没有字幕轨：hasSubtitles 为 false")
         precondition((result["cues"] as? [Any])?.isEmpty == true, "没有字幕轨：cues 为空")
         precondition(result["current"] is NSNull, "没有字幕轨：current 为 null")
@@ -240,6 +255,11 @@ struct NowPlayingQueryCheck {
         precondition(payload["data"] as? String == "ZmFrZQ==" && payload["mimeType"] as? String == "image/jpeg", "画面数据：\(payload)")
         precondition(double(payload["positionSeconds"]) == 42 && payload["title"] as? String == "测试视频", "画面附位置和标题：\(payload)")
         precondition(double(payload["bytes"]) == 4, "写出 JPEG 实际字节数：\(payload)")
+        assertPlayback(payload, videoOpen: true, playing: true, state: "playing", "画面播放中")
+        guard case .success(let pausedFrame) = NowPlayingQuery.answer(request, context: context(position: 42, isPlaying: false), captureFrame: { _ in .image("ZmFrZQ==") }) else {
+            preconditionFailure("暂停时取帧成功")
+        }
+        assertPlayback(pausedFrame, videoOpen: true, playing: false, state: "paused", "画面暂停")
 
         let timedOut = NowPlayingQuery.answer(request, context: context(position: 42)) { _ in .timedOut }
         guard case .failure(let code, let message) = timedOut else { preconditionFailure("超时必须是失败：\(timedOut)") }
@@ -256,7 +276,8 @@ struct NowPlayingQueryCheck {
         }
         guard case .success(let idlePayload) = idle else { preconditionFailure("没有在播放不是错误：\(idle)") }
         precondition(!capturedWhileIdle, "没有在播放时不取帧")
-        precondition(idlePayload["playing"] as? Bool == false && idlePayload["data"] == nil, "没有在播放时不返回画面：\(idlePayload)")
+        assertNoVideo(idlePayload, "画面")
+        precondition(idlePayload["data"] == nil, "没有在播放时不返回画面：\(idlePayload)")
 
         let nowRequest = AgentLinkRequest(token: "t", query: .nowPlaying, before: 30, after: 30, maxWidth: 1024)
         guard case .success(let now) = NowPlayingQuery.answer(nowRequest, context: context(position: 7), captureFrame: { _ in .failed }) else {

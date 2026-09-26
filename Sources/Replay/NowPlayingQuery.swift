@@ -83,12 +83,19 @@ enum NowPlayingQuery {
         return NowPlayingContext(entry: entry, clock: clock)
     }
 
+    /// 三个查询共用的状态字段：`videoOpen` 表示有视频打开，`playing` 只在真的在播放时为 true。
+    static func playbackFields(_ context: NowPlayingContext?) -> [String: Any] {
+        guard let context else { return ["videoOpen": false, "playing": false, "state": "none"] }
+        let isPlaying = context.clock.isPlaying
+        return ["videoOpen": true, "playing": isPlaying, "state": isPlaying ? "playing" : "paused"]
+    }
+
     static func notPlaying() -> [String: Any] {
-        ["playing": false, "message": notPlayingMessage]
+        playbackFields(nil).merging(["message": notPlayingMessage]) { _, new in new }
     }
 
     static func notRunning() -> [String: Any] {
-        ["playing": false, "message": notRunningMessage]
+        playbackFields(nil).merging(["message": notRunningMessage]) { _, new in new }
     }
 
     static func nowPlaying(_ context: NowPlayingContext?) -> [String: Any] {
@@ -96,9 +103,7 @@ enum NowPlayingQuery {
         let item = context.entry.item
         let position = max(0, context.clock.seconds)
         let duration = finitePositive(context.clock.durationSeconds) ?? finitePositive(item.duration)
-        return [
-            "playing": true,
-            "state": context.clock.isPlaying ? "playing" : "paused",
+        return playbackFields(context).merging([
             "title": item.title,
             "author": item.author,
             "sourceURL": webURL(item.urlString) ?? NSNull(),
@@ -109,7 +114,7 @@ enum NowPlayingQuery {
             "durationSeconds": duration.map { rounded($0, places: 2) } ?? NSNull(),
             "duration": duration.map(timecode) ?? NSNull(),
             "rate": rounded(context.clock.rate, places: 2)
-        ]
+        ]) { _, new in new }
     }
 
     /// 当前字幕与前后窗口内的字幕。当前那句与播放器浮层同一规则：短空隙里延续上一句。
@@ -118,13 +123,12 @@ enum NowPlayingQuery {
         let before = clampedWindow(before)
         let after = clampedWindow(after)
         let position = max(0, context.clock.seconds)
-        var result: [String: Any] = [
-            "playing": true,
+        var result = playbackFields(context).merging([
             "positionSeconds": rounded(position, places: 2),
             "position": timecode(position),
             "beforeSeconds": before,
             "afterSeconds": after
-        ]
+        ]) { _, new in new }
         guard let track = context.entry.subtitleTrack, !track.cues.isEmpty else {
             result["hasSubtitles"] = false
             result["current"] = NSNull()
@@ -159,13 +163,12 @@ enum NowPlayingQuery {
     /// 画面附带的说明：对应的时间和标题。
     static func frameCaption(_ context: NowPlayingContext) -> [String: Any] {
         let position = max(0, context.clock.seconds)
-        return [
-            "playing": true,
+        return playbackFields(context).merging([
             "title": context.entry.item.title,
             "itemID": context.entry.item.id.uuidString,
             "positionSeconds": rounded(position, places: 2),
             "position": timecode(position)
-        ]
+        ]) { _, new in new }
     }
 
     /// 应用端回答一次套接字查询。`captureFrame` 只在有画面可取时被调用。

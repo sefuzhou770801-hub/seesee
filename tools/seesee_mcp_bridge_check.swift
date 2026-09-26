@@ -45,7 +45,7 @@ struct SeeseeMCPBridgeCheck {
 
     private static let fileURL = URL(fileURLWithPath: "/tmp/bridge-check/video.mp4")
 
-    private static func playingContext() -> NowPlayingContext? {
+    private static func playingContext(isPlaying: Bool = true) -> NowPlayingContext? {
         let item = WatchItem(
             id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
             urlString: "https://youtu.be/dQw4w9WgXcQ",
@@ -71,8 +71,14 @@ struct SeeseeMCPBridgeCheck {
         return NowPlayingQuery.context(
             entry: NowPlayingEntry(item: item, fileURL: fileURL, subtitleTrack: track),
             playerFileURL: fileURL,
-            clock: NowPlayingClock(seconds: 42, isPlaying: true, rate: 1, durationSeconds: 90)
+            clock: NowPlayingClock(seconds: 42, isPlaying: isPlaying, rate: 1, durationSeconds: 90)
         )
+    }
+
+    private static func assertPlayback(_ json: [String: Any], videoOpen: Bool, playing: Bool, state: String, _ label: String) {
+        precondition(json["videoOpen"] as? Bool == videoOpen, "\(label)：videoOpen 应为 \(videoOpen)：\(json)")
+        precondition(json["playing"] as? Bool == playing, "\(label)：playing 应为 \(playing)：\(json)")
+        precondition(json["state"] as? String == state, "\(label)：state 应为 \(state)：\(json)")
     }
 
     private static func makeRoot() -> URL {
@@ -228,13 +234,15 @@ struct SeeseeMCPBridgeCheck {
         let now = call(bridge, "now_playing")
         precondition(now["isError"] as? Bool == false, "now_playing 不是错误：\(now)")
         let nowJSON = textJSON(now)
-        precondition(nowJSON["playing"] as? Bool == true && double(nowJSON["positionSeconds"]) == 42, "now_playing 结果：\(nowJSON)")
+        assertPlayback(nowJSON, videoOpen: true, playing: true, state: "playing", "now_playing 播放中")
+        precondition(double(nowJSON["positionSeconds"]) == 42, "now_playing 结果：\(nowJSON)")
         precondition(nowJSON["title"] as? String == "桥接测试" && nowJSON["videoID"] as? String == "dQw4w9WgXcQ", "now_playing 字段：\(nowJSON)")
 
         let subtitles = call(bridge, "current_subtitles", ["before_seconds": 5000, "after_seconds": -1])
         precondition(subtitles["isError"] as? Bool == false, "字幕不是错误")
         let subJSON = textJSON(subtitles)
         precondition((subJSON["current"] as? [String: Any])?["translation"] as? String == "你好", "当前字幕：\(subJSON)")
+        assertPlayback(subJSON, videoOpen: true, playing: true, state: "playing", "字幕播放中")
         let lastSub = app.requests.last
         precondition(lastSub?.query == .subtitles && lastSub?.before == 600 && lastSub?.after == 0, "桥接把越界参数夹到范围内：\(String(describing: lastSub))")
 
@@ -253,10 +261,18 @@ struct SeeseeMCPBridgeCheck {
         _ = call(bridge, "current_frame")
         precondition(app.requests.last?.maxWidth == 1024, "画面宽默认 1024")
 
+        // 暂停：有视频打开，但 playing 为 false。
+        app.context = playingContext(isPlaying: false)
+        for tool in ["now_playing", "current_subtitles"] {
+            assertPlayback(textJSON(call(bridge, tool)), videoOpen: true, playing: false, state: "paused", "\(tool) 暂停")
+        }
+
         // 没有在播放不是错误。
         app.context = nil
         let idle = call(bridge, "now_playing")
         precondition(idle["isError"] as? Bool == false, "没有在播放不是错误")
+        assertPlayback(textJSON(idle), videoOpen: false, playing: false, state: "none", "now_playing 没有视频")
+        assertPlayback(textJSON(call(bridge, "current_subtitles")), videoOpen: false, playing: false, state: "none", "current_subtitles 没有视频")
         precondition(textJSON(idle)["message"] as? String == "没有在播放", "没有在播放：\(textJSON(idle))")
         let idleFrame = call(bridge, "current_frame")
         precondition(idleFrame["isError"] as? Bool == false && text(idleFrame).contains("没有在播放"), "画面：没有在播放")
@@ -268,7 +284,7 @@ struct SeeseeMCPBridgeCheck {
         precondition(restarted.start() == .started)
         defer { restarted.stop() }
         let afterRestart = textJSON(call(bridge, "now_playing"))
-        precondition(afterRestart["playing"] as? Bool == true, "应用重启后同一个桥接进程继续可用：\(afterRestart)")
+        precondition(afterRestart["videoOpen"] as? Bool == true, "应用重启后同一个桥接进程继续可用：\(afterRestart)")
     }
 
     private static func checkNotRunning() {
@@ -279,7 +295,8 @@ struct SeeseeMCPBridgeCheck {
             let result = call(bridge, tool)
             precondition(result["isError"] as? Bool == false, "\(tool)：没有运行不是错误")
             let json = textJSON(result)
-            precondition(json["playing"] as? Bool == false && json["message"] as? String == "seesee 没有运行", "\(tool)：seesee 没有运行：\(json)")
+            assertPlayback(json, videoOpen: false, playing: false, state: "none", "\(tool) 没有运行")
+            precondition(json["message"] as? String == "seesee 没有运行", "\(tool)：seesee 没有运行：\(json)")
         }
     }
 
