@@ -585,3 +585,13 @@ for bind_host in 0.0.0.0 8.8.8.8; do
     fi
 done
 echo "lan_player_cli_bind=passed"
+
+# 看视频时屏幕不熄：主窗口、全屏、悬浮小窗共用的播放器必须阻止播放期间熄屏。
+compile_and_run display_sleep \
+    "$project_dir/Sources/Replay/VideoSubtitles.swift" \
+    "$project_dir/Sources/Replay/SubtitleOverlayLayout.swift" \
+    "$project_dir/Sources/Replay/SubtitleSentenceBlocks.swift" \
+    "$project_dir/Sources/Replay/SubtitleDispatch.swift" \
+    "$project_dir/Sources/Replay/SponsorSkip.swift" \
+    "$project_dir/Sources/Replay/LocalVideoPlayer.swift" \
+    "$project_dir/tools/display_sleep_check.swift"
